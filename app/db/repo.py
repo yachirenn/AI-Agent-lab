@@ -163,3 +163,74 @@ def advance_registration(
                 (customer_id, vehicle_model),
             )
         return True
+    
+class UnknownStation(LookupError):
+    pass
+
+
+def get_identity(customer_id: Any, channel: str) -> str | None:
+    with tx() as conn:
+        row = conn.execute(
+            "SELECT external_id FROM customer_identities WHERE customer_id = %s AND channel = %s",
+            (customer_id, channel),
+        ).fetchone()
+        return row["external_id"] if row else None
+
+
+def ingest_charging_session(
+    *,
+    external_id: str,
+    station_code: str,
+    charger_id: str,
+    customer_code: str | None,
+    kwh: Any,
+    amount_idr: int,
+    started_at: Any,
+    ended_at: Any,
+    points: int,
+) -> dict[str, Any]:
+    """Atomik: sesi + poin masuk bersama, atau tidak sama sekali.
+    Kembalikan status 'created' atau 'duplicate'."""
+    with tx() as conn:
+        station = conn.execute("SELECT id FROM stations WHERE code = %s", (station_code,)).fetchone()
+        if station is None:
+            raise UnknownStation(station_code)
+
+        customer_id = None
+        if customer_code:
+            row = conn.execute(
+                "SELECT id FROM customers WHERE customer_code = %s", (customer_code,)
+            ).fetchone()
+            customer_id = row["id"] if row else None   # tidak cocok: tetap simpan, tanpa poin
+
+        session = conn.execute(
+            """
+            INSERT INTO charging_sessions
+              (external_id, customer_id, station_id, charger_id, kwh, amount_idr, started_at, ended_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (external_id) DO NOTHING
+            RETURNING id
+            """,
+            (external_id, customer_id, station["id"], charger_id, kwh, amount_idr, started_at, ended_at),
+        ).fetchone()
+        if session is None:
+            return {"status": "duplicate", "customer_id": None, "points_awarded": 0, "balance": None}
+
+        awarded, balance = 0, None
+        if customer_id is not None:
+            if points > 0:
+                conn.execute(
+                    """
+                    INSERT INTO points_ledger (customer_id, delta, reason, ref_id)
+                    VALUES (%s, %s, 'charging', %s)
+                    ON CONFLICT (customer_id, reason, ref_id) DO NOTHING
+                    """,
+                    (customer_id, points, str(session["id"])),
+                )
+                awarded = points
+            balance = conn.execute(
+                "SELECT COALESCE(SUM(delta), 0)::int AS b FROM points_ledger WHERE customer_id = %s",
+                (customer_id,),
+            ).fetchone()["b"]
+
+        return {"status": "created", "customer_id": customer_id, "points_awarded": awarded, "balance": balance}
