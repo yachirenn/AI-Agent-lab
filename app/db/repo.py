@@ -270,3 +270,63 @@ def recent_messages(customer_id: Any, limit: int) -> list[dict[str, Any]]:
             (customer_id, limit),
         ).fetchall()
     return rows[::-1]
+
+
+def create_ticket(
+    customer_id: Any, level: int, category: str, summary: str, source: str
+) -> tuple[dict[str, Any], bool]:
+    """(tiket, created). created=False berarti sudah ada tiket aktif untuk kategori yang sama."""
+    with tx() as conn:
+        for _ in range(2):   # ulang sekali jika tiket lama di-resolve di sela INSERT dan SELECT
+            row = conn.execute(
+                """
+                INSERT INTO cs_tickets (customer_id, level, category, summary, source)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (customer_id, category) WHERE status <> 'resolved' DO NOTHING
+                RETURNING id, level, category
+                """,
+                (customer_id, level, category, summary, source),
+            ).fetchone()
+            if row:
+                return row, True
+            row = conn.execute(
+                "SELECT id, level, category FROM cs_tickets "
+                "WHERE customer_id = %s AND category = %s AND status <> 'resolved'",
+                (customer_id, category),
+            ).fetchone()
+            if row:
+                return row, False
+    raise RuntimeError("gagal membuat tiket")
+
+
+def open_tickets(customer_id: Any) -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            "SELECT id, level, category, summary, source, status, notified_at FROM cs_tickets "
+            "WHERE customer_id = %s AND status <> 'resolved' ORDER BY id",
+            (customer_id,),
+        ).fetchall()
+
+
+def resolve_ticket(ticket_id: int) -> bool:
+    with tx() as conn:
+        cur = conn.execute(
+            "UPDATE cs_tickets SET status = 'resolved', resolved_at = now() "
+            "WHERE id = %s AND status <> 'resolved'",
+            (ticket_id,),
+        )
+        return cur.rowcount == 1
+
+
+def mark_notified(ticket_id: int) -> None:
+    with tx() as conn:
+        conn.execute("UPDATE cs_tickets SET notified_at = now() WHERE id = %s", (ticket_id,))
+
+
+def count_recent_inbound(customer_id: Any, seconds: int) -> int:
+    with tx() as conn:
+        return conn.execute(
+            "SELECT count(*)::int AS n FROM conversations "
+            "WHERE customer_id = %s AND direction = 'in' AND created_at > now() - %s * interval '1 second'",
+            (customer_id, seconds),
+        ).fetchone()["n"]

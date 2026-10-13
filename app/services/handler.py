@@ -6,6 +6,12 @@ from app.channels.base import InboundMessage
 from app.db import repo
 from app.services import registration
 from app.agent.loop import run_agent
+import os
+
+from app.services import escalation, registration   # gabungkan dengan import registration yang sudah ada
+
+RATE_WINDOW_SECONDS = 60
+RATE_REPLY = "Pesan Anda terlalu cepat. Mohon tunggu sebentar sebelum mengirim pesan berikutnya."
 
 
 def handle_inbound(msg: InboundMessage) -> str | None:
@@ -22,7 +28,20 @@ def handle_inbound(msg: InboundMessage) -> str | None:
     return reply
 
 
-def _route(customer: dict[str, Any], msg: InboundMessage) -> str:
+def _handle_registered(customer: dict[str, Any], msg: InboundMessage) -> str | None:
+    esc = escalation.classify(msg.text)
+    if esc is not None:   # aturan pasti, LLM tidak dilibatkan
+        return escalation.process(customer, esc, msg.text)
+
+    recent = repo.count_recent_inbound(customer["id"], RATE_WINDOW_SECONDS)   # sudah termasuk pesan ini
+    limit = int(os.environ.get("AGENT_MSGS_PER_MINUTE", "8"))
+    if recent > limit:
+        return RATE_REPLY if recent == limit + 1 else None   # beri tahu sekali, lalu diam
+
+    return run_agent(customer["id"], msg.text)
+
+
+def _route(customer: dict[str, Any], msg: InboundMessage) -> str | None:
     state = customer["registration_state"]
 
     if msg.is_start:   # /start tidak dianggap sebagai jawaban
@@ -31,7 +50,7 @@ def _route(customer: dict[str, Any], msg: InboundMessage) -> str:
       return registration.PROMPTS[state]
 
     if state == "done":
-        return "Pesan Anda sudah kami terima. Asisten Enerva akan segera tersedia."
+        return _handle_registered(customer, msg)
 
     try:
         next_state, answer = registration.handle_answer(state, msg.text)

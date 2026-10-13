@@ -16,6 +16,6 @@ def clean_db():
     yield
     with repo.tx() as conn:
         conn.execute(
-            "TRUNCATE conversations, points_ledger, charging_sessions, vehicles, "
+            "TRUNCATE cs_tickets, conversations, points_ledger, charging_sessions, vehicles, "
             "customer_identities, customers RESTART IDENTITY CASCADE"
         )

@@ -9,6 +9,19 @@ from app.db import repo
 
 logger = logging.getLogger(__name__)
 
+_AGENT_TICKET_CATEGORIES = ("complaint", "points_issue", "transaction_issue", "other")
+
+
+def _create_ticket(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    category = args.get("category")
+    if category not in _AGENT_TICKET_CATEGORIES:
+        return {"error": f"category harus salah satu dari {list(_AGENT_TICKET_CATEGORIES)}"}
+    summary = " ".join(str(args.get("summary", "")).split())[:300]
+    if len(summary) < 5:
+        return {"error": "summary terlalu pendek"}
+    ticket, created = repo.create_ticket(ctx.customer_id, 2, category, summary, "agent")   # level dikunci 2
+    return {"ticket_id": ticket["id"], "created": created}
+
 
 @dataclass(frozen=True)
 class ToolContext:
@@ -84,8 +97,23 @@ TOOLS: dict[str, Tool] = {
             {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
             _search_faq,
         ),
+        Tool(
+            "create_support_ticket",
+            "Buat tiket untuk tim Enerva jika customer menyampaikan komplain atau masalah yang tidak bisa kamu selesaikan. "
+            "Bukan untuk keadaan darurat.",
+            {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "enum": list(_AGENT_TICKET_CATEGORIES)},
+                    "summary": {"type": "string", "description": "Ringkasan masalah, 1-2 kalimat"},
+                },
+                "required": ["category", "summary"],
+            },
+            _create_ticket,
+        ),
     ]
 }
+
 
 
 def declarations() -> list[dict[str, Any]]:
