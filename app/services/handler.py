@@ -5,6 +5,7 @@ from typing import Any
 from app.channels.base import InboundMessage
 from app.db import repo
 from app.services import registration
+from app.agent.loop import run_agent
 
 
 def handle_inbound(msg: InboundMessage) -> str | None:
@@ -25,9 +26,9 @@ def _route(customer: dict[str, Any], msg: InboundMessage) -> str:
     state = customer["registration_state"]
 
     if msg.is_start:   # /start tidak dianggap sebagai jawaban
-        if state == "done":
-            return f"Anda sudah terdaftar. Customer ID Anda: {customer['customer_code']}"
-        return registration.PROMPTS[state]
+      if state == "done":
+        return run_agent(customer["id"], msg.text)
+      return registration.PROMPTS[state]
 
     if state == "done":
         return "Pesan Anda sudah kami terima. Asisten Enerva akan segera tersedia."

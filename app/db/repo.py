@@ -234,3 +234,39 @@ def ingest_charging_session(
             ).fetchone()["b"]
 
         return {"status": "created", "customer_id": customer_id, "points_awarded": awarded, "balance": balance}
+    
+    
+def get_customer(customer_id: Any) -> dict[str, Any] | None:
+    with tx() as conn:
+        return conn.execute(
+            "SELECT customer_code, name, driver_type, home_area, main_route FROM customers WHERE id = %s",
+            (customer_id,),
+        ).fetchone()
+
+
+def get_customer_by_code(customer_code: str) -> dict[str, Any] | None:
+    with tx() as conn:
+        return conn.execute("SELECT * FROM customers WHERE customer_code = %s", (customer_code,)).fetchone()
+
+
+def recent_sessions(customer_id: Any, limit: int) -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT s.name AS station, cs.charger_id, cs.kwh, cs.amount_idr, cs.started_at
+            FROM charging_sessions cs JOIN stations s ON s.id = cs.station_id
+            WHERE cs.customer_id = %s
+            ORDER BY cs.started_at DESC LIMIT %s
+            """,
+            (customer_id, limit),
+        ).fetchall()
+
+
+def recent_messages(customer_id: Any, limit: int) -> list[dict[str, Any]]:
+    """Urutan kronologis (terlama dulu)."""
+    with tx() as conn:
+        rows = conn.execute(
+            "SELECT direction, body FROM conversations WHERE customer_id = %s ORDER BY id DESC LIMIT %s",
+            (customer_id, limit),
+        ).fetchall()
+    return rows[::-1]
