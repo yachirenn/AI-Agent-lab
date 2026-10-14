@@ -4,6 +4,7 @@ from app.agent import loop
 from app.agent.llm_client import LLMResponse, ToolCall
 from app.db import repo
 
+from app.agent.llm_client import FallbackLLM, LLMError
 
 class ScriptedLLM:
     """Memutar skenario: tiap panggilan chat() mengembalikan respons berikutnya."""
@@ -75,3 +76,46 @@ def test_limit_argument_is_clamped():
     c = _customer()
     llm = ScriptedLLM(LLMResponse("", [ToolCall("get_recent_sessions", {"limit": "banyak"})]), _echo_tool_result)
     assert "sessions" in loop.run_agent(c["id"], "riwayat", llm=llm)
+
+class _Down:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, *a):
+        self.calls += 1
+        raise LLMError("429")
+
+
+class _Up:
+    def chat(self, *a):
+        return LLMResponse("ok")
+
+
+def test_fallback_moves_to_next_provider_and_rests_the_failed_one():
+    down, now = _Down(), [0.0]
+    llm = FallbackLLM([("a", down), ("b", _Up())], cooldown=60, clock=lambda: now[0])
+    assert llm.chat("s", [], []).text == "ok"
+    assert llm.chat("s", [], []).text == "ok"
+    assert down.calls == 1            # tidak dicoba lagi selama masa istirahat
+    now[0] = 61
+    llm.chat("s", [], [])
+    assert down.calls == 2            # dicoba lagi setelah cooldown
+
+
+def test_fallback_raises_when_all_providers_fail():
+    llm = FallbackLLM([("a", _Down()), ("b", _Down())])
+    import pytest
+    with pytest.raises(LLMError):
+        llm.chat("s", [], [])
+
+
+def test_openai_message_conversion_keeps_tool_call_ids():
+    from app.agent.llm_client import _to_openai
+    call = ToolCall("get_points_balance", {}, "c1")
+    out = _to_openai([
+        {"role": "user", "text": "poin?"},
+        {"role": "assistant", "text": "", "tool_calls": [call], "raw": None},
+        {"role": "tool", "name": "get_points_balance", "result": {"points_balance": 5}, "id": "c1"},
+    ])
+    assert out[1]["tool_calls"][0]["id"] == "c1"
+    assert out[2]["tool_call_id"] == "c1"

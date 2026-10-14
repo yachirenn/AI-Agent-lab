@@ -7,6 +7,14 @@ from typing import Any, Protocol
 import httpx
 from dotenv import load_dotenv
 
+import json
+import logging
+import time
+import uuid
+from functools import lru_cache
+
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 
 
@@ -18,6 +26,7 @@ class LLMError(RuntimeError):
 class ToolCall:
     name: str
     args: dict[str, Any]
+    id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,7 +96,13 @@ def _to_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     contents: list[dict[str, Any]] = []
     for m in messages:
         if m["role"] == "assistant":
-            contents.append(m["raw"] or {"role": "model", "parts": [{"text": m["text"]}]})
+            if m.get("raw"):
+                contents.append(m["raw"])
+            elif m.get("tool_calls"):
+                parts = [{"functionCall": {"name": tc.name, "args": tc.args}} for tc in m["tool_calls"]]
+                contents.append({"role": "model", "parts": parts})
+            else:
+                contents.append({"role": "model", "parts": [{"text": m["text"]}]})
             continue
         part = (
             {"text": m["text"]}
@@ -101,5 +116,108 @@ def _to_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return contents
 
 
+_OPENAI_COMPAT = {
+    # nama: (base_url, env key, env model)
+    "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", "GROQ_MODEL"),
+    "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"),
+    "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", "CEREBRAS_MODEL"),
+}
+
+
+@lru_cache(maxsize=1)   # satu instance: status circuit breaker harus bertahan antar pesan
 def get_llm() -> LLMClient:
-    return GeminiClient(os.environ["GEMINI_API_KEY"], os.environ["LLM_MODEL"])
+    order = [p.strip() for p in os.environ.get("LLM_PROVIDERS", "groq,openrouter,gemini").split(",") if p.strip()]
+    clients: list[tuple[str, LLMClient]] = []
+    for name in order:
+        if name == "gemini":
+            if os.environ.get("GEMINI_API_KEY") and os.environ.get("LLM_MODEL"):
+                clients.append((name, GeminiClient(os.environ["GEMINI_API_KEY"], os.environ["LLM_MODEL"])))
+        elif name == "ollama":
+            if os.environ.get("OLLAMA_MODEL"):
+                url = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
+                clients.append((name, OpenAICompatClient(name, url, None, os.environ["OLLAMA_MODEL"], timeout=90.0)))
+        elif name in _OPENAI_COMPAT:
+            url, key_env, model_env = _OPENAI_COMPAT[name]
+            if os.environ.get(key_env) and os.environ.get(model_env):
+                clients.append((name, OpenAICompatClient(name, url, os.environ[key_env], os.environ[model_env])))
+    if not clients:
+        raise LLMError("tidak ada provider LLM yang dikonfigurasi di .env")
+    logger.info("provider LLM aktif: %s", [n for n, _ in clients])
+    return FallbackLLM(clients)
+
+class OpenAICompatClient:
+    """Groq, OpenRouter, Cerebras, Ollama, dan lainnya: semuanya berbicara format yang sama."""
+
+    def __init__(self, name: str, base_url: str, api_key: str | None, model: str, timeout: float = 30.0) -> None:
+        self.name, self._url, self._model = name, base_url.rstrip("/") + "/chat/completions", model
+        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._http = httpx.Client(timeout=timeout)
+
+    def chat(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": [{"role": "system", "content": system}, *_to_openai(messages)],
+            "temperature": 0.2,
+            "max_tokens": 600,
+        }
+        if tools:
+            body["tools"] = [{"type": "function", "function": t} for t in tools]
+        try:
+            resp = self._http.post(self._url, json=body, headers=self._headers)
+        except httpx.HTTPError as exc:
+            raise LLMError(f"{self.name}: koneksi gagal ({type(exc).__name__})") from None
+        if resp.status_code != 200:
+            raise LLMError(f"{self.name}: HTTP {resp.status_code}")
+        try:
+            msg = resp.json()["choices"][0]["message"]
+            calls = []
+            for tc in msg.get("tool_calls") or []:
+                args = json.loads(tc["function"].get("arguments") or "{}")
+                calls.append(ToolCall(tc["function"]["name"], args if isinstance(args, dict) else {}, tc.get("id")))
+        except (KeyError, IndexError, ValueError, TypeError):
+            raise LLMError(f"{self.name}: respons tidak valid") from None
+        return LLMResponse(text=(msg.get("content") or "").strip(), tool_calls=calls, raw=None)
+
+
+def _to_openai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if m["role"] == "user":
+            out.append({"role": "user", "content": m["text"]})
+        elif m["role"] == "assistant" and m.get("tool_calls"):
+            out.append({
+                "role": "assistant",
+                "content": m["text"] or None,
+                "tool_calls": [
+                    {"id": tc.id or f"call_{uuid.uuid4().hex[:12]}", "type": "function",
+                     "function": {"name": tc.name, "arguments": json.dumps(tc.args)}}
+                    for tc in m["tool_calls"]
+                ],
+            })
+        elif m["role"] == "assistant":
+            out.append({"role": "assistant", "content": m["text"]})
+        else:
+            out.append({"role": "tool", "tool_call_id": m.get("id") or "", "content": json.dumps(m["result"])})
+    return out
+
+
+class FallbackLLM:
+    """Coba penyedia berurutan. Yang gagal diistirahatkan sebentar (circuit breaker),
+    supaya tiap pesan tidak menunggu timeout penyedia yang sedang kena limit."""
+
+    def __init__(self, clients: list[tuple[str, LLMClient]], cooldown: float = 60.0, clock=time.monotonic) -> None:
+        self._clients, self._cooldown, self._clock = clients, cooldown, clock
+        self._down_until: dict[str, float] = {}
+
+    def chat(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
+        now = self._clock()
+        candidates = [c for c in self._clients if self._down_until.get(c[0], 0) <= now] or self._clients
+        failed = []
+        for name, client in candidates:
+            try:
+                return client.chat(system, messages, tools)
+            except LLMError as exc:
+                self._down_until[name] = self._clock() + self._cooldown
+                failed.append(name)
+                logger.warning("provider %s gagal: %s", name, exc)
+        raise LLMError("semua provider gagal: " + ", ".join(failed))

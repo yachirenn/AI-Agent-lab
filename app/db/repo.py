@@ -1,6 +1,7 @@
 """Semua akses SQL lewat modul ini. Layer lain (agent, API) tidak boleh menulis SQL."""
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -612,4 +613,101 @@ def ticket_queue() -> list[dict[str, Any]]:
             WHERE t.status <> 'resolved'
             ORDER BY t.level DESC, t.created_at
             """
+        ).fetchall()
+
+
+def upsert_knowledge_item(
+    *,
+    slug: str,
+    title: str,
+    category: str,
+    content: str,
+    embedding: list[float] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            INSERT INTO knowledge_base (slug, title, category, content, embedding, metadata, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (slug) DO UPDATE SET
+                title = EXCLUDED.title,
+                category = EXCLUDED.category,
+                content = EXCLUDED.content,
+                embedding = COALESCE(EXCLUDED.embedding, knowledge_base.embedding),
+                metadata = EXCLUDED.metadata,
+                updated_at = now()
+            RETURNING id, slug, title, category, content, metadata, updated_at
+            """,
+            (slug, title, category, content, embedding, json.dumps(metadata or {})),
+        ).fetchone()
+
+
+def get_knowledge_item(slug: str) -> dict[str, Any] | None:
+    with tx() as conn:
+        return conn.execute(
+            "SELECT id, slug, title, category, content, embedding, metadata, created_at, updated_at "
+            "FROM knowledge_base WHERE slug = %s",
+            (slug,),
+        ).fetchone()
+
+
+def list_knowledge_items(category: str | None = None) -> list[dict[str, Any]]:
+    with tx() as conn:
+        if category:
+            return conn.execute(
+                "SELECT id, slug, title, category, content, metadata, created_at, updated_at "
+                "FROM knowledge_base WHERE category = %s ORDER BY title",
+                (category,),
+            ).fetchall()
+        return conn.execute(
+            "SELECT id, slug, title, category, content, metadata, created_at, updated_at "
+            "FROM knowledge_base ORDER BY category, title"
+        ).fetchall()
+
+
+def delete_knowledge_item(slug: str) -> bool:
+    with tx() as conn:
+        cur = conn.execute("DELETE FROM knowledge_base WHERE slug = %s", (slug,))
+        return cur.rowcount == 1
+
+
+def count_knowledge_items() -> int:
+    with tx() as conn:
+        return conn.execute("SELECT count(*)::int AS n FROM knowledge_base").fetchone()["n"]
+
+
+def all_knowledge_embeddings() -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            "SELECT id, slug, title, category, content, embedding, metadata "
+            "FROM knowledge_base WHERE embedding IS NOT NULL"
+        ).fetchall()
+
+
+def search_knowledge_lexical(query: str, limit: int = 3) -> list[dict[str, Any]]:
+    with tx() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, slug, title, category, content, metadata,
+                   ts_rank_cd(to_tsvector('indonesian', title || ' ' || content), plainto_tsquery('indonesian', %s)) AS rank
+            FROM knowledge_base
+            WHERE to_tsvector('indonesian', title || ' ' || content) @@ plainto_tsquery('indonesian', %s)
+            ORDER BY rank DESC
+            LIMIT %s
+            """,
+            (query, query, limit),
+        ).fetchall()
+        if rows:
+            return rows
+        # Fallback ILIKE jika tsquery tidak cocok
+        return conn.execute(
+            """
+            SELECT id, slug, title, category, content, metadata, 0.1 AS rank
+            FROM knowledge_base
+            WHERE title ILIKE %s OR content ILIKE %s
+            ORDER BY title
+            LIMIT %s
+            """,
+            (f"%{query}%", f"%{query}%", limit),
         ).fetchall()

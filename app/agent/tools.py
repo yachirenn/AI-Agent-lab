@@ -93,7 +93,7 @@ TOOLS: dict[str, Tool] = {
         ),
         Tool(
             "search_faq",
-            "Cari info umum Enerva: jam buka, Wi-Fi, poin, tarif.",
+            "Cari informasi resmi Enerva: lokasi stasiun, jam operasional, fasilitas, Wi-Fi, tipe charger/konektor (CCS2/AC), tarif kWh, dan program reward.",
             {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
             _search_faq,
         ),

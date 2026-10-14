@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 from app.db import repo  # noqa: E402
 from app.services import customer360  # noqa: E402
+from app.agent import knowledge  # noqa: E402
 
 WIB = ZoneInfo("Asia/Jakarta")
 st.set_page_config(page_title="Enerva Intelligence", layout="wide")
@@ -56,8 +57,8 @@ def load_overview(days: int):
 
 require_login()
 st.title("⚡ Enerva Customer Intelligence")
-tab_overview, tab_customers, tab_inactive, tab_tickets = st.tabs(
-    ["Ringkasan", "Customer 360°", "Inaktivitas", "Antrean CS"]
+tab_overview, tab_customers, tab_inactive, tab_tickets, tab_kb = st.tabs(
+    ["Ringkasan", "Customer 360°", "Inaktivitas", "Antrean CS", "Knowledge Base (RAG)"]
 )
 
 with tab_overview:
@@ -151,3 +152,29 @@ with tab_tickets:
         df = pd.DataFrame(tickets)
         df["created_at"] = df["created_at"].map(fmt)
         st.dataframe(df, use_container_width=True, hide_index=True)   # teks customer tampil sebagai teks biasa
+
+with tab_kb:
+    st.subheader("📚 Knowledge Base & Semantic Search (RAG)")
+    test_q = st.text_input("Uji Pencarian Pertanyaan Customer", placeholder="Contoh: bisa bayar pakai qris?")
+    if test_q:
+        results = knowledge.search_detailed(test_q, top=3)
+        if results:
+            st.write(f"Ditemukan **{len(results)} artikel** paling relevan:")
+            for r in results:
+                score = r.get("score", 0.0)
+                sim = r.get("similarity", 0.0)
+                cat = r.get("category", "general").upper()
+                with st.expander(f"[{cat}] {r['title']} — Skor Relevansi: {score:.2f} (Kemiripan Vektor: {sim:.2f})", expanded=True):
+                    st.write(r["content"])
+                    st.caption(f"Slug: `{r.get('slug')}` | Kategori: `{r.get('category')}`")
+        else:
+            st.warning("Tidak ada artikel yang cocok dengan ambang batas kemiripan.")
+
+    st.divider()
+    cat_filter = st.selectbox("Filter Kategori Artikel", ["Semua", "station", "pricing", "points", "troubleshooting", "faq"])
+    kb_items = repo.list_knowledge_items(None if cat_filter == "Semua" else cat_filter)
+    if kb_items:
+        df_kb = pd.DataFrame(kb_items)[["slug", "title", "category", "content"]]
+        st.dataframe(df_kb, use_container_width=True, hide_index=True)
+    else:
+        st.info("Belum ada artikel dalam kategori ini.")

@@ -17,5 +17,5 @@ def clean_db():
     with repo.tx() as conn:
         conn.execute(
             "TRUNCATE inactivity_alerts, consent_events, cs_tickets, conversations, points_ledger, charging_sessions, vehicles, "
-            "customer_identities, customers RESTART IDENTITY CASCADE"
+            "customer_identities, customers, knowledge_base RESTART IDENTITY CASCADE"
         )

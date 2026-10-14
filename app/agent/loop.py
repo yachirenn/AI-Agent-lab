@@ -57,8 +57,8 @@ def _run(customer_id: Any, text: str, llm: LLMClient) -> str:
         messages.append({"role": "assistant", "text": resp.text, "tool_calls": resp.tool_calls, "raw": resp.raw})
         for call in resp.tool_calls:
             result = tools.execute(ctx, call.name, call.args)
-            logger.info("tool=%s customer=%s", call.name, customer_id)   # audit: nama tool saja, tanpa isi data
-            messages.append({"role": "tool", "name": call.name, "result": result})
+            logger.info("tool=%s customer=%s", call.name, customer_id)
+            messages.append({"role": "tool", "name": call.name, "result": result, "id": call.id})
 
     logger.warning("agent melewati %s langkah customer=%s", MAX_STEPS, customer_id)
     return FALLBACK
