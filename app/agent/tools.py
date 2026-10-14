@@ -70,6 +70,26 @@ def _search_faq(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     return {"answers": faq.search(str(args.get("query", ""))[:200])}
 
 
+
+def declarations() -> list[dict[str, Any]]:
+    return [{"name": t.name, "description": t.description, "parameters": t.parameters} for t in TOOLS.values()]
+
+
+def execute(ctx: ToolContext, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    tool = TOOLS.get(name)
+    if tool is None:
+        return {"error": f"tool '{name}' tidak ada"}
+    try:
+        return tool.run(ctx, args)
+    except Exception:
+        logger.exception("tool %s gagal", name)
+        return {"error": "tool gagal dijalankan"}
+    
+    
+def _my_preferences(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    return {"preferences": {p["pref_key"]: p["pref_value"] for p in repo.list_preferences(ctx.customer_id)}}
+
+
 @dataclass(frozen=True)
 class Tool:
     name: str
@@ -111,21 +131,11 @@ TOOLS: dict[str, Tool] = {
             },
             _create_ticket,
         ),
+        Tool(
+            "get_my_preferences",
+            "Preferensi customer yang sedang chat (antrean, harga, fasilitas), untuk menyesuaikan saran.",
+            _NO_ARGS,
+            _my_preferences,
+        ),
     ]
 }
-
-
-
-def declarations() -> list[dict[str, Any]]:
-    return [{"name": t.name, "description": t.description, "parameters": t.parameters} for t in TOOLS.values()]
-
-
-def execute(ctx: ToolContext, name: str, args: dict[str, Any]) -> dict[str, Any]:
-    tool = TOOLS.get(name)
-    if tool is None:
-        return {"error": f"tool '{name}' tidak ada"}
-    try:
-        return tool.run(ctx, args)
-    except Exception:
-        logger.exception("tool %s gagal", name)
-        return {"error": "tool gagal dijalankan"}

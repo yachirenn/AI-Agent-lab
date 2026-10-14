@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 # Harus dijalankan sebelum app.db.repo diimpor, supaya pool memakai DB tes.
 os.environ["DATABASE_URL"] = os.environ["DATABASE_URL"].rsplit("/", 1)[0] + "/enerva_test"
+os.environ["PREFERENCES_LEARNING"] = "off"
 
 from app.db import repo  # noqa: E402
 

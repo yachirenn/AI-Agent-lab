@@ -8,7 +8,7 @@ from app.services import registration
 from app.agent.loop import run_agent
 import os
 
-from app.services import escalation, registration   # gabungkan dengan import registration yang sudah ada
+from app.services import escalation, preferences, registration   # gabungkan dengan import registration yang sudah ada
 
 RATE_WINDOW_SECONDS = 60
 RATE_REPLY = "Pesan Anda terlalu cepat. Mohon tunggu sebentar sebelum mengirim pesan berikutnya."
@@ -19,6 +19,29 @@ STOP_REPLY = (
     "Pesan layanan seperti struk charging dan notifikasi poin tetap kami kirim."
 )
 SUBSCRIBE_REPLY = "Terima kasih, Anda akan menerima info promo dan reward Enerva. Balas /stop kapan saja untuk berhenti."
+
+_PRIVACY_COMMANDS = {"/preferensi", "/lupa", "/ingat"}
+
+
+def _privacy_command(customer: dict[str, Any], msg: InboundMessage, state: str) -> str | None:
+    parts = msg.text.strip().lower().split()
+    if not parts:
+        return None
+    command = parts[0].split("@")[0]
+    if command not in _PRIVACY_COMMANDS:
+        return None
+    if state != "done":
+        return "Selesaikan pendaftaran dulu.\n\n" + registration.PROMPTS[state]
+
+    cid = customer["id"]
+    if command == "/preferensi":
+        return preferences.describe(repo.list_preferences(cid))
+    if command == "/lupa":
+        deleted = repo.delete_preferences(cid)
+        repo.set_personalization(cid, False)
+        return f"{deleted} preferensi dihapus. Enerva berhenti mempelajari preferensi dari chat Anda. Balas /ingat untuk mengaktifkan lagi."
+    repo.set_personalization(cid, True)
+    return "Personalisasi diaktifkan lagi. Balas /preferensi untuk melihat data Anda kapan saja."
 
 
 def _consent_command(customer: dict[str, Any], msg: InboundMessage, state: str) -> str | None:
@@ -60,13 +83,18 @@ def _handle_registered(customer: dict[str, Any], msg: InboundMessage) -> str | N
     if recent > limit:
         return RATE_REPLY if recent == limit + 1 else None   # beri tahu sekali, lalu diam
 
-    return run_agent(customer["id"], msg.text)
+    reply = run_agent(customer["id"], msg.text)
+    preferences.schedule(customer["id"], msg.channel, msg.message_id, msg.text)
+    return reply
 
 
 def _route(customer: dict[str, Any], msg: InboundMessage) -> str | None:
     state = customer["registration_state"]
     
     command_reply = _consent_command(customer, msg, state)
+    privacy_reply = _privacy_command(customer, msg, state)
+    if privacy_reply is not None:
+        return privacy_reply
     if command_reply is not None:
         return command_reply
 

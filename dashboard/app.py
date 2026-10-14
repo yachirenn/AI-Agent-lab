@@ -131,6 +131,9 @@ with tab_customers:
                     "Kunjungan terakhir": fmt(p["last_visit"]),
                 }
             )
+            st.write(
+                "**Preferensi dari percakapan:**", p["preferences"] or "belum ada"
+            )
 
 with tab_inactive:
     alerts = repo.open_inactivity_alerts()

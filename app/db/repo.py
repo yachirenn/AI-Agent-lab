@@ -711,3 +711,69 @@ def search_knowledge_lexical(query: str, limit: int = 3) -> list[dict[str, Any]]
             """,
             (f"%{query}%", f"%{query}%", limit),
         ).fetchall()
+        
+        
+def message_id_by_channel(channel: str, channel_message_id: str) -> int | None:
+    with tx() as conn:
+        row = conn.execute(
+            "SELECT id FROM conversations WHERE channel = %s AND channel_message_id = %s",
+            (channel, channel_message_id),
+        ).fetchone()
+        return row["id"] if row else None
+
+
+def personalization_enabled(customer_id: Any) -> bool:
+    with tx() as conn:
+        row = conn.execute(
+            "SELECT personalization_enabled FROM customers WHERE id = %s", (customer_id,)
+        ).fetchone()
+        return bool(row and row["personalization_enabled"])
+
+
+def set_personalization(customer_id: Any, enabled: bool) -> None:
+    with tx() as conn:
+        conn.execute("UPDATE customers SET personalization_enabled = %s WHERE id = %s", (enabled, customer_id))
+
+
+def upsert_preference(
+    customer_id: Any, key: str, value: str, confidence: float, evidence_message_id: int | None
+) -> None:
+    """Pernyataan terbaru menimpa yang lama. Flag personalisasi dicek di SQL yang sama,
+    sehingga /lupa yang masuk saat ekstraksi berjalan tidak bisa 'dikalahkan' oleh insert terlambat."""
+    with tx() as conn:
+        conn.execute(
+            """
+            INSERT INTO customer_preferences (customer_id, pref_key, pref_value, confidence, evidence_message_id)
+            SELECT %s::uuid, %s::text, %s::text, %s::numeric, %s::bigint
+            WHERE EXISTS (SELECT 1 FROM customers WHERE id = %s::uuid AND personalization_enabled)
+            ON CONFLICT (customer_id, pref_key) DO UPDATE SET
+              pref_value = EXCLUDED.pref_value,
+              confidence = EXCLUDED.confidence,
+              evidence_message_id = EXCLUDED.evidence_message_id,
+              updated_at = now()
+            """,
+            (customer_id, key, value, confidence, evidence_message_id, customer_id),
+        )
+
+
+def list_preferences(customer_id: Any) -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            "SELECT pref_key, pref_value, confidence::float AS confidence, updated_at "
+            "FROM customer_preferences WHERE customer_id = %s ORDER BY pref_key",
+            (customer_id,),
+        ).fetchall()
+
+
+def delete_preferences(customer_id: Any) -> int:
+    with tx() as conn:
+        return conn.execute("DELETE FROM customer_preferences WHERE customer_id = %s", (customer_id,)).rowcount
+
+
+def preference_summary() -> list[dict[str, Any]]:
+    """Agregat saja, tanpa identitas."""
+    with tx() as conn:
+        return conn.execute(
+            "SELECT pref_key, pref_value, count(*)::int AS customers FROM customer_preferences "
+            "GROUP BY 1, 2 ORDER BY 1, 3 DESC"
+        ).fetchall()

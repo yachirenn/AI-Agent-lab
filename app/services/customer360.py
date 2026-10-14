@@ -47,6 +47,7 @@ def get(customer_code: str) -> dict[str, Any] | None:
         "home_area": raw["home_area"],
         "main_route": raw["main_route"],
         "consent_marketing": raw["consent_marketing"],
+        "preferences": {p["pref_key"]: p["pref_value"] for p in repo.list_preferences(raw["id"])},
         # Hanya konsumsi di Enerva. Total kebutuhan energi butuh data telematics (Phase 3).
         "kwh_per_day": kwh_30d / 30,
         "kwh_per_week": kwh_30d / 30 * 7,
