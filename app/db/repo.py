@@ -456,3 +456,160 @@ def count_recent_inbound(customer_id: Any, seconds: int) -> int:
             "WHERE customer_id = %s AND direction = 'in' AND created_at > now() - %s * interval '1 second'",
             (customer_id, seconds),
         ).fetchone()["n"]
+        
+        
+_BREAKDOWN_DIMS = {"driver_type": "driver_type", "home_area": "home_area"}   # whitelist nama kolom
+
+
+def dashboard_kpis(days: int) -> dict[str, Any]:
+    """days = jendela saat ini; jendela pembanding = `days` hari sebelumnya (untuk retention)."""
+    with tx() as conn:
+        return conn.execute(
+            """
+            WITH cur AS (
+              SELECT customer_id, count(*) AS n
+              FROM charging_sessions
+              WHERE customer_id IS NOT NULL AND started_at > now() - %(d)s * interval '1 day'
+              GROUP BY customer_id),
+            prev AS (
+              SELECT DISTINCT customer_id FROM charging_sessions
+              WHERE customer_id IS NOT NULL
+                AND started_at >  now() - %(d2)s * interval '1 day'
+                AND started_at <= now() - %(d)s  * interval '1 day')
+            SELECT
+              (SELECT count(*) FROM customers WHERE registration_state = 'done')::int AS registered,
+              (SELECT count(*) FROM cur)::int AS active_drivers,
+              (SELECT COALESCE(sum(kwh), 0) FROM charging_sessions
+                 WHERE started_at > now() - %(d)s * interval '1 day')::float AS total_kwh,
+              (SELECT count(*) FROM cur WHERE n >= 2)::int AS repeat_drivers,
+              (SELECT count(*) FROM prev)::int AS prev_active,
+              (SELECT count(*) FROM prev WHERE customer_id IN (SELECT customer_id FROM cur))::int AS retained,
+              (SELECT count(*) FROM cs_tickets WHERE status <> 'resolved')::int AS open_tickets,
+              (SELECT count(*) FROM cs_tickets WHERE status <> 'resolved' AND level = 3)::int AS urgent_tickets,
+              (SELECT count(*) FROM inactivity_alerts WHERE status = 'open')::int AS inactivity_alerts
+            """,
+            {"d": days, "d2": days * 2},
+        ).fetchone()
+
+
+def sessions_by_hour(days: int) -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT extract(hour FROM started_at AT TIME ZONE 'Asia/Jakarta')::int AS hour, count(*)::int AS sessions
+            FROM charging_sessions WHERE started_at > now() - %s * interval '1 day'
+            GROUP BY 1 ORDER BY 1
+            """,
+            (days,),
+        ).fetchall()
+
+
+def sessions_by_station(days: int) -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT st.name AS station, count(*)::int AS sessions, COALESCE(sum(cs.kwh), 0)::float AS kwh
+            FROM charging_sessions cs JOIN stations st ON st.id = cs.station_id
+            WHERE cs.started_at > now() - %s * interval '1 day'
+            GROUP BY st.name ORDER BY kwh DESC
+            """,
+            (days,),
+        ).fetchall()
+
+
+def customer_breakdown(dim: str) -> list[dict[str, Any]]:
+    column = _BREAKDOWN_DIMS[dim]   # KeyError jika di luar whitelist
+    query = sql.SQL(
+        "SELECT COALESCE({col}, '-') AS label, count(*)::int AS customers FROM customers "
+        "WHERE registration_state = 'done' GROUP BY 1 ORDER BY 2 DESC"
+    ).format(col=sql.Identifier(column))
+    with tx() as conn:
+        return conn.execute(query).fetchall()
+
+
+def customer_list(search: str, limit: int) -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT c.customer_code, c.name, c.driver_type, c.home_area,
+                   max(cs.started_at) AS last_visit,
+                   count(cs.id) FILTER (WHERE cs.started_at > now() - interval '30 days')::int AS sessions_30d,
+                   COALESCE(sum(cs.kwh) FILTER (WHERE cs.started_at > now() - interval '30 days'), 0)::float AS kwh_30d,
+                   (SELECT COALESCE(sum(l.delta), 0)::int FROM points_ledger l WHERE l.customer_id = c.id) AS points
+            FROM customers c LEFT JOIN charging_sessions cs ON cs.customer_id = c.id
+            WHERE c.registration_state = 'done'
+              AND (%(q)s = '' OR c.customer_code ILIKE %(like)s OR c.name ILIKE %(like)s)
+            GROUP BY c.id
+            ORDER BY last_visit DESC NULLS LAST
+            LIMIT %(limit)s
+            """,
+            {"q": search, "like": f"%{search}%", "limit": limit},
+        ).fetchall()
+
+
+def customer_360_raw(customer_code: str) -> dict[str, Any] | None:
+    with tx() as conn:
+        c = conn.execute(
+            """
+            SELECT c.id, c.customer_code, c.name, c.driver_type, c.home_area, c.main_route,
+                   c.consent_marketing, c.created_at,
+                   (SELECT COALESCE(sum(kwh), 0)::float FROM charging_sessions s
+                      WHERE s.customer_id = c.id AND s.started_at > now() - interval '30 days') AS kwh_30d,
+                   (SELECT count(*)::int FROM charging_sessions s
+                      WHERE s.customer_id = c.id AND s.started_at > now() - interval '28 days') AS visits_28d,
+                   (SELECT count(*)::int FROM charging_sessions s WHERE s.customer_id = c.id) AS total_sessions,
+                   (SELECT max(started_at) FROM charging_sessions s WHERE s.customer_id = c.id) AS last_visit,
+                   (SELECT COALESCE(sum(delta), 0)::int FROM points_ledger l WHERE l.customer_id = c.id) AS points,
+                   EXISTS (SELECT 1 FROM inactivity_alerts a
+                           WHERE a.customer_id = c.id AND a.status = 'open') AS has_open_alert
+            FROM customers c WHERE c.customer_code = %s
+            """,
+            (customer_code,),
+        ).fetchone()
+        if c is None:
+            return None
+        hour = conn.execute(
+            """
+            SELECT extract(hour FROM started_at AT TIME ZONE 'Asia/Jakarta')::int AS h
+            FROM charging_sessions WHERE customer_id = %s AND started_at > now() - interval '90 days'
+            GROUP BY 1 ORDER BY count(*) DESC, 1 LIMIT 1
+            """,
+            (c["id"],),
+        ).fetchone()
+        station = conn.execute(
+            """
+            SELECT st.name FROM charging_sessions s JOIN stations st ON st.id = s.station_id
+            WHERE s.customer_id = %s AND s.started_at > now() - interval '90 days'
+            GROUP BY st.name ORDER BY count(*) DESC, st.name LIMIT 1
+            """,
+            (c["id"],),
+        ).fetchone()
+        gap = conn.execute(
+            """
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY gap_s)::float AS median_gap_s
+            FROM (SELECT extract(epoch FROM started_at - lag(started_at) OVER (ORDER BY started_at)) AS gap_s
+                  FROM charging_sessions
+                  WHERE customer_id = %s AND started_at > now() - interval '90 days') g
+            WHERE gap_s IS NOT NULL
+            """,
+            (c["id"],),
+        ).fetchone()
+        return {
+            **c,
+            "preferred_hour": hour["h"] if hour else None,
+            "preferred_station": station["name"] if station else None,
+            "median_gap_s": gap["median_gap_s"] if gap else None,
+        }
+
+
+def ticket_queue() -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT t.id, t.level, t.category, t.status, t.source, t.created_at,
+                   t.notified_at IS NOT NULL AS alerted, c.customer_code, c.name, t.summary
+            FROM cs_tickets t JOIN customers c ON c.id = t.customer_id
+            WHERE t.status <> 'resolved'
+            ORDER BY t.level DESC, t.created_at
+            """
+        ).fetchall()
