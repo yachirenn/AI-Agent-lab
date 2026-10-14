@@ -1,4 +1,5 @@
 import uuid
+from xml.sax import handler
 
 from app.channels.base import InboundMessage
 from app.db import repo
@@ -49,3 +50,10 @@ def test_invalid_answer_keeps_state_and_reprompts():
 
     assert "1. Ride-hailing" in reply
     assert repo.get_customer_by_identity("sim", user)["registration_state"] == "ask_driver_type"
+    
+def test_command_text_is_not_accepted_as_answer():
+    user = f"u-{uuid.uuid4()}"
+    handle_inbound(_msg(user, "/start"))
+    reply = handle_inbound(InboundMessage("sim", user, user, f"{user}:x", "/apapun"))
+    assert "tidak valid" in reply
+    assert repo.get_customer_by_identity("sim", user)["registration_state"] == "ask_name"

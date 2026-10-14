@@ -13,6 +13,28 @@ from app.services import escalation, registration   # gabungkan dengan import re
 RATE_WINDOW_SECONDS = 60
 RATE_REPLY = "Pesan Anda terlalu cepat. Mohon tunggu sebentar sebelum mengirim pesan berikutnya."
 
+_CONSENT_COMMANDS = {"/stop": False, "/subscribe": True}
+STOP_REPLY = (
+    "Baik, Anda tidak akan menerima pesan promo lagi. "
+    "Pesan layanan seperti struk charging dan notifikasi poin tetap kami kirim."
+)
+SUBSCRIBE_REPLY = "Terima kasih, Anda akan menerima info promo dan reward Enerva. Balas /stop kapan saja untuk berhenti."
+
+
+def _consent_command(customer: dict[str, Any], msg: InboundMessage, state: str) -> str | None:
+    parts = msg.text.strip().lower().split()
+    if not parts:
+        return None
+    command = parts[0].split("@")[0]
+    if command not in _CONSENT_COMMANDS:
+        return None
+    granted = _CONSENT_COMMANDS[command]
+    if granted and state != "done":
+        return "Selesaikan pendaftaran dulu, lalu kirim /subscribe lagi.\n\n" + registration.PROMPTS[state]
+    repo.set_marketing_consent(customer["id"], granted, "command")
+    if granted:
+        return SUBSCRIBE_REPLY
+    return STOP_REPLY if state == "done" else STOP_REPLY + "\n\n" + registration.PROMPTS[state]
 
 def handle_inbound(msg: InboundMessage) -> str | None:
     """Kembalikan teks balasan, atau None jika pesan duplikat / tidak perlu dibalas."""
@@ -43,10 +65,14 @@ def _handle_registered(customer: dict[str, Any], msg: InboundMessage) -> str | N
 
 def _route(customer: dict[str, Any], msg: InboundMessage) -> str | None:
     state = customer["registration_state"]
+    
+    command_reply = _consent_command(customer, msg, state)
+    if command_reply is not None:
+        return command_reply
 
-    if msg.is_start:   # /start tidak dianggap sebagai jawaban
+    if msg.is_start:
       if state == "done":
-        return run_agent(customer["id"], msg.text)
+          return f"Anda sudah terdaftar. Customer ID Anda: {customer['customer_code']}"
       return registration.PROMPTS[state]
 
     if state == "done":

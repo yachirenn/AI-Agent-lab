@@ -42,6 +42,8 @@ class Answer:
 
 def _clean(raw: str, label: str, min_len: int = 2, max_len: int = 80) -> str:
     value = " ".join(raw.split())
+    if value.startswith ("/") or value.startswith("@"):
+        raise InvalidAnswer(f"{label} tidak valid.")
     if not (min_len <= len(value) <= max_len):
         raise InvalidAnswer(f"{label} harus {min_len}-{max_len} karakter.")
     return value

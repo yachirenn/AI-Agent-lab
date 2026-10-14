@@ -157,6 +157,11 @@ def advance_registration(
         cur = conn.execute(query, (*params, customer_id, from_state))
         if cur.rowcount != 1:
             return False
+        if "consent_marketing" in fields:
+            conn.execute(
+                "INSERT INTO consent_events (customer_id, granted, source) VALUES (%s, %s, 'registration')",
+                (customer_id, fields["consent_marketing"]),
+            )
         if vehicle_model:
             conn.execute(
                 "INSERT INTO vehicles (customer_id, model) VALUES (%s, %s)",
@@ -167,6 +172,127 @@ def advance_registration(
 class UnknownStation(LookupError):
     pass
 
+
+def set_marketing_consent(customer_id: Any, granted: bool, source: str) -> bool:
+    """True jika nilainya benar-benar berubah. Memanggil /stop dua kali tidak menulis dua event."""
+    with tx() as conn:
+        cur = conn.execute(
+            """
+            UPDATE customers SET consent_marketing = %s, consent_at = now()
+            WHERE id = %s AND consent_marketing IS DISTINCT FROM %s
+            """,
+            (granted, customer_id, granted),
+        )
+        if cur.rowcount != 1:
+            return False
+        conn.execute(
+            "INSERT INTO consent_events (customer_id, granted, source) VALUES (%s, %s, %s)",
+            (customer_id, granted, source),
+        )
+        return True
+
+
+def consent_history(customer_id: Any) -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            "SELECT granted, source FROM consent_events WHERE customer_id = %s ORDER BY id",
+            (customer_id,),
+        ).fetchall()
+
+
+def detect_inactive(*, min_sessions: int, factor: float, min_days: int, lookback_days: int) -> int:
+    """Buat alert untuk customer yang absen lebih lama dari baseline-nya. Kembalikan jumlah alert baru."""
+    with tx() as conn:
+        cur = conn.execute(
+            """
+            WITH gaps AS (
+              SELECT customer_id, started_at,
+                     extract(epoch FROM started_at
+                             - lag(started_at) OVER (PARTITION BY customer_id ORDER BY started_at)) AS gap_s
+              FROM charging_sessions
+              WHERE customer_id IS NOT NULL
+                AND started_at > now() - %(lookback)s * interval '1 day'
+            ), agg AS (
+              SELECT customer_id, max(started_at) AS last_visit,
+                     percentile_cont(0.5) WITHIN GROUP (ORDER BY gap_s) AS median_gap_s
+              FROM gaps
+              GROUP BY customer_id
+              HAVING count(*) >= %(min_sessions)s
+            )
+            INSERT INTO inactivity_alerts (customer_id, last_visit_at, median_gap_hours)
+            SELECT customer_id, last_visit, round((median_gap_s / 3600)::numeric, 1)
+            FROM agg
+            WHERE extract(epoch FROM now() - last_visit)
+                  > GREATEST(median_gap_s * %(factor)s::float8, %(min_days)s * 86400)
+            ON CONFLICT (customer_id) WHERE status = 'open' DO NOTHING
+            """,
+            {"lookback": lookback_days, "min_sessions": min_sessions, "factor": factor, "min_days": min_days},
+        )
+        return cur.rowcount
+
+
+def resolve_returned_alerts() -> int:
+    """Customer yang punya sesi baru setelah kunjungan terakhir yang tercatat di alert."""
+    with tx() as conn:
+        cur = conn.execute(
+            """
+            UPDATE inactivity_alerts a SET status = 'resolved', resolved_at = now()
+            WHERE a.status = 'open' AND EXISTS (
+              SELECT 1 FROM charging_sessions cs
+              WHERE cs.customer_id = a.customer_id AND cs.started_at > a.last_visit_at)
+            """
+        )
+        return cur.rowcount
+
+
+def open_inactivity_alerts() -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT a.id, a.customer_id, c.customer_code, c.name, c.consent_marketing,
+                   a.last_visit_at, a.median_gap_hours, a.retention_sent_at, a.detected_at
+            FROM inactivity_alerts a JOIN customers c ON c.id = a.customer_id
+            WHERE a.status = 'open' ORDER BY a.detected_at, a.id
+            """
+        ).fetchall()
+
+
+def pending_retention_alerts() -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT a.id, a.customer_id FROM inactivity_alerts a
+            JOIN customers c ON c.id = a.customer_id
+            WHERE a.status = 'open' AND a.retention_sent_at IS NULL
+              AND c.consent_marketing AND c.registration_state = 'done'
+            ORDER BY a.id
+            """
+        ).fetchall()
+
+
+def claim_retention(alert_id: int, cooldown_days: int) -> dict[str, Any] | None:
+    """Klaim atomik: consent, status, dan cooldown dicek dalam SATU statement.
+    None berarti tidak boleh kirim (consent dicabut, sudah dikirim, atau masih cooldown)."""
+    with tx() as conn:
+        return conn.execute(
+            """
+            UPDATE inactivity_alerts a SET retention_sent_at = now()
+            FROM customers c
+            WHERE a.id = %s AND a.status = 'open' AND a.retention_sent_at IS NULL
+              AND c.id = a.customer_id AND c.consent_marketing AND c.registration_state = 'done'
+              AND NOT EXISTS (
+                SELECT 1 FROM inactivity_alerts p
+                WHERE p.customer_id = a.customer_id
+                  AND p.retention_sent_at > now() - %s * interval '1 day')
+            RETURNING c.id AS customer_id, c.name
+            """,
+            (alert_id, cooldown_days),
+        ).fetchone()
+
+
+def release_retention(alert_id: int) -> None:
+    with tx() as conn:
+        conn.execute("UPDATE inactivity_alerts SET retention_sent_at = NULL WHERE id = %s", (alert_id,))
 
 def get_identity(customer_id: Any, channel: str) -> str | None:
     with tx() as conn:
