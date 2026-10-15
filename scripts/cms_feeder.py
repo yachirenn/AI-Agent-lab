@@ -20,8 +20,8 @@ def event(**override):
         "station_code": "sunset-road",
         "charger_id": "04",
         "customer_code": code,
-        "kwh": "42.30",
-        "amount_idr": 95000,
+        "kwh": "450",
+        "amount_idr": 195000,
         "started_at": (end - timedelta(minutes=38)).isoformat(),
         "ended_at": end.isoformat(),
     }
