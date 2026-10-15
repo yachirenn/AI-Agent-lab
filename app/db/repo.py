@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
+
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from dotenv import load_dotenv
 from psycopg import Connection, sql
@@ -15,6 +17,119 @@ load_dotenv()
 
 _pool: ConnectionPool | None = None
 
+
+def _enqueue(
+    conn: Connection, *, kind: str, channel: str, recipient: str, body: str,
+    customer_id: Any = None, ticket_id: int | None = None, dedup_key: str | None = None,
+) -> bool:
+    cur = conn.execute(
+        """
+        INSERT INTO outbox (kind, channel, recipient, customer_id, ticket_id, body, dedup_key)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (dedup_key) DO NOTHING
+        """,
+        (kind, channel, recipient, customer_id, ticket_id, body, dedup_key),
+    )
+    return cur.rowcount == 1
+
+
+def enqueue_message(**kwargs: Any) -> bool:
+    """True jika baris baru dibuat; False jika dedup_key sudah ada."""
+    with tx() as conn:
+        return _enqueue(conn, **kwargs)
+
+
+def claim_outbox(limit: int, lock_seconds: int) -> list[dict[str, Any]]:
+    """Aman dijalankan beberapa worker: baris terkunci dilewati (SKIP LOCKED).
+    Baris 'sending' yang lock-nya kedaluwarsa (worker mati) diklaim ulang."""
+    with tx() as conn:
+        return conn.execute(
+            """
+            UPDATE outbox SET status = 'sending', attempts = attempts + 1,
+                   locked_until = now() + %s * interval '1 second'
+            WHERE id IN (
+              SELECT id FROM outbox
+              WHERE (status = 'pending' AND next_attempt_at <= now())
+                 OR (status = 'sending' AND locked_until < now())
+              ORDER BY (kind = 'staff_alert') DESC, id
+              LIMIT %s
+              FOR UPDATE SKIP LOCKED)
+            RETURNING id, kind, channel, recipient, customer_id, ticket_id, body, attempts
+            """,
+            (lock_seconds, limit),
+        ).fetchall()
+
+
+def complete_outbox(outbox_id: int) -> None:
+    with tx() as conn:
+        row = conn.execute(
+            "UPDATE outbox SET status = 'sent', sent_at = now(), locked_until = NULL WHERE id = %s RETURNING ticket_id",
+            (outbox_id,),
+        ).fetchone()
+        if row and row["ticket_id"]:   # bukti bahwa staf benar-benar diberi tahu
+            conn.execute("UPDATE cs_tickets SET notified_at = now() WHERE id = %s", (row["ticket_id"],))
+
+
+def fail_outbox(outbox_id: int, error: str, *, permanent: bool, attempts: int, max_attempts: int) -> str:
+    status = "dead" if permanent or attempts >= max_attempts else "pending"
+    delay = int(min(30 * 2 ** max(attempts - 1, 0), 1800) * random.uniform(0.8, 1.2))   # 30s, 60s, 120s ... maks 30 menit
+    with tx() as conn:
+        conn.execute(
+            "UPDATE outbox SET status = %s, last_error = %s, locked_until = NULL, "
+            "next_attempt_at = now() + %s * interval '1 second' WHERE id = %s",
+            (status, error[:200], delay, outbox_id),
+        )
+    return status
+
+
+def unalerted_urgent_tickets(min_age_seconds: int) -> list[dict[str, Any]]:
+    """Tiket urgent terbuka yang belum diberitahukan dan belum punya baris outbox."""
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT t.id, t.category, t.summary, c.id AS customer_id, c.customer_code, c.name
+            FROM cs_tickets t JOIN customers c ON c.id = t.customer_id
+            WHERE t.level = 3 AND t.status = 'open' AND t.notified_at IS NULL
+              AND t.created_at < now() - %s * interval '1 second'
+              AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.dedup_key = 'ticket:' || t.id)
+            """,
+            (min_age_seconds,),
+        ).fetchall()
+
+
+def outbox_stats() -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT status, kind, count(*)::int AS n,
+                   COALESCE(max(extract(epoch FROM now() - created_at))
+                            FILTER (WHERE status IN ('pending', 'sending')), 0)::int AS oldest_s
+            FROM outbox GROUP BY 1, 2 ORDER BY 1, 2
+            """
+        ).fetchall()
+
+
+def dead_outbox(limit: int = 50) -> list[dict[str, Any]]:
+    """Tanpa recipient dan body: itu data pribadi."""
+    with tx() as conn:
+        return conn.execute(
+            "SELECT id, kind, channel, attempts, last_error, created_at FROM outbox "
+            "WHERE status = 'dead' ORDER BY id DESC LIMIT %s",
+            (limit,),
+        ).fetchall()
+
+
+def count_inbound(customer_id: Any) -> int:
+    with tx() as conn:
+        return conn.execute(
+            "SELECT count(*)::int AS n FROM conversations WHERE customer_id = %s AND direction = 'in'",
+            (customer_id,),
+        ).fetchone()["n"]
+
+
+def ping() -> None:
+    with tx() as conn:
+        conn.execute("SELECT 1")
 
 def get_pool() -> ConnectionPool:
     global _pool
@@ -315,6 +430,7 @@ def ingest_charging_session(
     started_at: Any,
     ended_at: Any,
     points: int,
+    notify: Callable[[int, int], str] | None = None
 ) -> dict[str, Any]:
     """Atomik: sesi + poin masuk bersama, atau tidak sama sekali.
     Kembalikan status 'created' atau 'duplicate'."""
@@ -359,6 +475,20 @@ def ingest_charging_session(
                 "SELECT COALESCE(SUM(delta), 0)::int AS b FROM points_ledger WHERE customer_id = %s",
                 (customer_id,),
             ).fetchone()["b"]
+            
+            if notify and awarded > 0:
+                ident = conn.execute(
+                    "SELECT channel, external_id FROM customer_identities "
+                    "WHERE customer_id = %s AND channel IN ('whatsapp', 'telegram') "
+                    "ORDER BY (channel = 'telegram') DESC LIMIT 1",
+                    (customer_id,),
+                ).fetchone()
+                if ident:
+                    _enqueue(
+                        conn, kind="notification", channel=ident["channel"], recipient=ident["external_id"],
+                        body=notify(awarded, balance), customer_id=customer_id,
+                        dedup_key=f"charge:{session['id']}"
+                    )
 
         return {"status": "created", "customer_id": customer_id, "points_awarded": awarded, "balance": balance}
     

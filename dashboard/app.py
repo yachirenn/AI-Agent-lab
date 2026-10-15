@@ -132,7 +132,7 @@ with tab_customers:
                 }
             )
             st.write(
-                "**Preferensi dari percakapan:**", p["preferences"] or "belum ada"
+                "**Preferensi dari percakapan:**", p["preferred_station"] or "belum ada"
             )
 
 with tab_inactive:
@@ -181,3 +181,15 @@ with tab_kb:
         st.dataframe(df_kb, use_container_width=True, hide_index=True)
     else:
         st.info("Belum ada artikel dalam kategori ini.")
+        
+with st.expander("Sistem: antrean pengiriman"):
+    stats = repo.outbox_stats()
+    if stats:
+        st.dataframe(pd.DataFrame(stats), use_container_width=True, hide_index=True)
+    else:
+        st.caption("Outbox kosong.")
+    dead = repo.dead_outbox()
+    if any(d["kind"] == "staff_alert" for d in dead):
+        st.error("Ada ALERT STAF yang gagal terkirim permanen. Hubungi staf lewat jalur lain.")
+    if dead:
+        st.dataframe(pd.DataFrame(dead), use_container_width=True, hide_index=True)

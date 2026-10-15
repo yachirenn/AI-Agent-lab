@@ -1,20 +1,25 @@
 import logging
 
 from app.channels import telegram
+from app.channels.base import InboundMessage
+from app.services import dispatcher
 from app.services.handler import handle_inbound
 
 logger = logging.getLogger(__name__)
 
 
-def process_update(update: dict) -> None:
-    """Satu-satunya pintu masuk. Dipakai webhook maupun polling."""
-    msg = telegram.parse_update(update)
-    if msg is None:
-        return
+def process_message(msg: InboundMessage) -> None:
+    """Pintu masuk semua channel. Balasan ke customer dikirim langsung (ia sedang menunggu)."""
     try:
         reply = handle_inbound(msg)
         if reply:
-            telegram.send_message(msg.chat_id, reply)
+            dispatcher.send(msg.channel, msg.chat_id, reply)
     except Exception:
-        # Jangan log isi pesan: itu data pribadi.
-        logger.exception("gagal memproses update_id=%s", update.get("update_id"))
+        logger.exception("gagal memproses pesan", extra={"channel": msg.channel})   # tanpa isi pesan
+
+
+def process_update(update: dict) -> None:
+    """Update mentah Telegram (dipakai webhook dan polling)."""
+    msg = telegram.parse_update(update)
+    if msg is not None:
+        process_message(msg)

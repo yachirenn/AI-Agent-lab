@@ -2,5 +2,8 @@ import logging
 
 from app.services import inactivity
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+from dotenv import load_dotenv
+load_dotenv()
+from app.logging_config import setup_logging
+setup_logging()
 print(inactivity.run_once())

@@ -1,15 +1,25 @@
 from __future__ import annotations
 
-import logging
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
-from app.channels import telegram
 from app.db import repo
 from app.schemas import ChargingEvent
 from app.services import loyalty
 
-logger = logging.getLogger(__name__)
+
+def _id(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
+
+
+def _render(kwh: Decimal) -> Callable[[int, int], str]:
+    def render(points: int, balance: int) -> str:
+        return (
+            f"Charging selesai: {kwh:.2f} kWh ⚡\n"
+            f"Anda mendapat {_id(points)} poin.\n"
+            f"Saldo: {_id(balance)} poin."
+        )
+    return render
 
 
 def process_charging_event(event: ChargingEvent) -> dict[str, Any]:
@@ -23,25 +33,5 @@ def process_charging_event(event: ChargingEvent) -> dict[str, Any]:
         started_at=event.started_at,
         ended_at=event.ended_at,
         points=loyalty.points_for_kwh(event.kwh),
+        notify=_render(event.kwh),
     )
-
-
-def _id(n: int) -> str:
-    return f"{n:,}".replace(",", ".")
-
-
-def notify_customer(result: dict[str, Any], kwh: Decimal) -> None:
-    """Dipanggil SETELAH commit. Gagal kirim hanya di-log; poin sudah aman di ledger."""
-    try:
-        chat_id = repo.get_identity(result["customer_id"], "telegram")
-        if chat_id is None:
-            return
-        text = (
-            f"Charging selesai: {kwh:.2f} kWh ⚡\n"
-            f"Anda mendapat {_id(result['points_awarded'])} poin.\n"
-            f"Saldo: {_id(result['balance'])} poin."
-        )
-        telegram.send_message(chat_id, text)
-        repo.record_message(result["customer_id"], "telegram", "out", text)
-    except Exception:
-        logger.exception("notifikasi charging gagal customer=%s", result.get("customer_id"))

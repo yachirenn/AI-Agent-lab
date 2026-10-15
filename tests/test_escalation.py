@@ -6,7 +6,7 @@ from app.agent import loop
 from app.agent.llm_client import LLMResponse, ToolCall
 from app.channels.base import InboundMessage
 from app.db import repo
-from app.services import alerts, escalation, handler
+from app.services import dispatcher, escalation, handler
 from tests.test_agent import ScriptedLLM, _echo_tool_result
 
 
@@ -39,38 +39,6 @@ def test_classify_known_categories(text, category):
 @pytest.mark.parametrize("text", ["jam buka stasiun?", "poin saya berapa?"])
 def test_normal_messages_are_level_1(text):
     assert escalation.classify(text) is None
-
-
-def test_urgent_creates_ticket_alerts_staff_and_skips_llm(monkeypatch):
-    sent = []
-    monkeypatch.setenv("STAFF_TELEGRAM_CHAT_ID", "staff-1")
-    monkeypatch.setattr(alerts.telegram, "send_message", lambda chat, text: sent.append((chat, text)))
-    monkeypatch.setattr(handler, "run_agent", lambda *a, **k: pytest.fail("LLM tidak boleh dipanggil untuk urgent"))
-    user, c = _done_user("Made")
-
-    reply = handler.handle_inbound(_msg(user, "charger #04 berhenti sendiri, saya menunggu"))
-
-    assert "tiket #" in reply
-    assert len(sent) == 1 and sent[0][0] == "staff-1"
-    assert "URGENT" in sent[0][1] and c["customer_code"] in sent[0][1]
-    (ticket,) = repo.open_tickets(c["id"])
-    assert (ticket["level"], ticket["category"], ticket["source"]) == (3, "charger_failure", "rule")
-    assert ticket["notified_at"] is not None
-
-
-def test_repeated_urgent_alerts_staff_only_once(monkeypatch):
-    sent = []
-    monkeypatch.setenv("STAFF_TELEGRAM_CHAT_ID", "staff-1")
-    monkeypatch.setattr(alerts.telegram, "send_message", lambda chat, text: sent.append(text))
-    user, c = _done_user()
-
-    handler.handle_inbound(_msg(user, "terbakar!"))
-    second = handler.handle_inbound(_msg(user, "masih terbakar"))
-
-    assert len(sent) == 1
-    assert "sudah kami terima" in second
-    assert len(repo.open_tickets(c["id"])) == 1
-
 
 def test_rate_limit_warns_once_then_stays_silent(monkeypatch):
     monkeypatch.setenv("AGENT_MSGS_PER_MINUTE", "3")
@@ -113,3 +81,32 @@ def test_resolved_ticket_allows_new_ticket_in_same_category():
     repo.resolve_ticket(t1["id"])
     t3, created3 = repo.create_ticket(c["id"], 2, "complaint", "tiga", "rule")
     assert created3 and t3["id"] != t1["id"]
+    
+def test_urgent_creates_ticket_enqueues_alert_and_skips_llm(monkeypatch):
+    monkeypatch.setenv("STAFF_TELEGRAM_CHAT_ID", "staff-1")
+    monkeypatch.setattr(handler, "run_agent", lambda *a, **k: pytest.fail("LLM tidak boleh dipanggil untuk urgent"))
+    user, c = _done_user("Made")
+
+    reply = handler.handle_inbound(_msg(user, "charger #04 berhenti sendiri, saya menunggu"))
+    assert "tiket #" in reply
+    (ticket,) = repo.open_tickets(c["id"])
+    assert (ticket["level"], ticket["category"], ticket["source"]) == (3, "charger_failure", "rule")
+    assert ticket["notified_at"] is None           # baru diantre, belum terkirim
+
+    sent = []
+    monkeypatch.setattr(dispatcher, "send", lambda ch, to, text: sent.append((ch, to, text)))
+    assert dispatcher.run_once()["sent"] == 1
+    assert sent[0][:2] == ("telegram", "staff-1")
+    assert "URGENT" in sent[0][2] and c["customer_code"] in sent[0][2]
+    (ticket,) = repo.open_tickets(c["id"])
+    assert ticket["notified_at"] is not None
+    
+def test_repeated_urgent_enqueues_alert_only_once(monkeypatch):
+    monkeypatch.setenv("STAFF_TELEGRAM_CHAT_ID", "staff-1")
+    user, c = _done_user()
+    handler.handle_inbound(_msg(user, "terbakar!"))
+    second = handler.handle_inbound(_msg(user, "masih terbakar"))
+    with repo.tx() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM outbox").fetchone()["n"] == 1
+    assert "sudah kami terima" in second
+    assert len(repo.open_tickets(c["id"])) == 1

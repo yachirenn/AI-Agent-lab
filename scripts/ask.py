@@ -5,7 +5,10 @@ import sys
 from app.agent.loop import run_agent
 from app.db import repo
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+from dotenv import load_dotenv
+load_dotenv()
+from app.logging_config import setup_logging
+setup_logging()
 customer = repo.get_customer_by_code(sys.argv[1])
 if customer is None:
     sys.exit("customer tidak ditemukan")

@@ -21,7 +21,9 @@ _client = httpx.Client(timeout=httpx.Timeout(40.0, connect=10.0))
 
 
 class TelegramError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def _call(method: str, **params: Any) -> Any:
@@ -32,7 +34,7 @@ def _call(method: str, **params: Any) -> Any:
         # `from None`: pesan exception asli memuat URL (dan token), jadi tidak diteruskan.
         raise TelegramError(f"{method} gagal: {type(exc).__name__}") from None
     if resp.status_code != 200:
-        raise TelegramError(f"{method} -> HTTP {resp.status_code}")
+        raise TelegramError(f"{method} -> HTTP {resp.status_code}", resp.status_code)
     return resp.json()["result"]
 
 

@@ -49,6 +49,10 @@ def _consent_command(customer: dict[str, Any], msg: InboundMessage, state: str) 
     if not parts:
         return None
     command = parts[0].split("@")[0]
+    if len(parts) == 1 and command in {"stop", "berhenti"}:
+        command = "/stop"
+    if len(parts) == 1 and command in {"subscribe", "langganan"}:
+        command = "/subscribe"
     if command not in _CONSENT_COMMANDS:
         return None
     granted = _CONSENT_COMMANDS[command]
@@ -98,7 +102,8 @@ def _route(customer: dict[str, Any], msg: InboundMessage) -> str | None:
     if command_reply is not None:
         return command_reply
 
-    if msg.is_start:
+    first_contact = state == "ask_name" and repo.count_inbound(customer["id"]) <= 1
+    if msg.is_start or first_contact:   # pesan pertama apa pun dari customer baru dianggap sapaan, bukan nama
       if state == "done":
           return f"Anda sudah terdaftar. Customer ID Anda: {customer['customer_code']}"
       return registration.PROMPTS[state]
