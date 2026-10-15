@@ -15,6 +15,7 @@ load_dotenv()
 from app.db import repo  # noqa: E402
 from app.services import customer360  # noqa: E402
 from app.agent import knowledge  # noqa: E402
+from app.services import handover  # noqa: E402
 
 WIB = ZoneInfo("Asia/Jakarta")
 st.set_page_config(page_title="Enerva Intelligence", layout="wide")
@@ -150,11 +151,103 @@ with tab_inactive:
 with tab_tickets:
     tickets = repo.ticket_queue()
     if not tickets:
-        st.success("Antrean kosong.")
+        st.success("🎉 Antrean kosong. Semua pelanggan terlayani!")
     else:
-        df = pd.DataFrame(tickets)
-        df["created_at"] = df["created_at"].map(fmt)
-        st.dataframe(df, use_container_width=True, hide_index=True)   # teks customer tampil sebagai teks biasa
+        # Metrik Ringkasan Tiket
+        c_tot, c_urg, c_prog = st.columns(3)
+        n_urgent = sum(1 for t in tickets if t.get("level") == 3)
+        n_prog = sum(1 for t in tickets if t.get("status") == "in_progress")
+        c_tot.metric("Total Tiket Aktif", len(tickets))
+        c_urg.metric(
+            "Perlu Respon Segera (Urgent Lv 3)",
+            n_urgent,
+            delta=f"{n_urgent} bahaya" if n_urgent else None,
+            delta_color="inverse",
+        )
+        c_prog.metric("Sedang Ditangani Staf", n_prog)
+
+        st.divider()
+
+        # Workspace Dua Kolom: Daftar Tiket di Kiri, Live Handover di Kanan
+        col_list, col_chat = st.columns([1, 2])
+        with col_list:
+            st.subheader("📋 Daftar Antrean")
+            options = {
+                t["id"]: f"#{t['id']} [{t['status'].upper()}] Lv{t['level']} {t['customer_code']} ({t.get('name') or '-'})"
+                for t in tickets
+            }
+            selected_id = st.radio(
+                "Pilih Tiket untuk Ditangani:",
+                list(options.keys()),
+                format_func=lambda tid: options[tid],
+                key="selected_ticket_radio",
+            )
+            selected_ticket = next((t for t in tickets if t["id"] == selected_id), None)
+
+        with col_chat:
+            if selected_ticket:
+                t = selected_ticket
+                st.subheader(f"💬 Live Handover: Tiket #{t['id']} ({t['customer_code']})")
+
+                badge_channel = "📱 Telegram" if t.get("channel") == "telegram" else "💬 WhatsApp"
+                severity = "🚨 LEVEL 3 (URGENT)" if t.get("level") == 3 else "⚠️ LEVEL 2 (KOMPLAIN)"
+                st.info(
+                    f"**Status Saat Ini:** `{t['status'].upper()}` | **Prioritas:** {severity} | **Channel:** {badge_channel}\n\n"
+                    f"**Kategori:** `{t['category']}` | **Ringkasan:** {t['summary']}"
+                )
+
+                st.markdown("##### 📜 Riwayat Obrolan Pelanggan")
+                messages = repo.customer_conversations(t["customer_id"], limit=30)
+                chat_box = st.container(height=350)
+                with chat_box:
+                    if not messages:
+                        st.caption("Belum ada riwayat pesan.")
+                    for m in messages:
+                        is_user = m["direction"] == "in"
+                        with st.chat_message("user" if is_user else "assistant"):
+                            time_str = fmt(m["created_at"])
+                            header = (
+                                f"{t.get('name') or 'Customer'} ({time_str})"
+                                if is_user
+                                else f"Enerva AI / Staf ({time_str})"
+                            )
+                            st.caption(header)
+                            st.write(m["body"])
+
+                st.markdown("##### ✍️ Kirim Balasan Staf Langsung")
+                staff_name = st.text_input("Nama Staf Penjawab", value="Staf CS Enerva", key=f"name_{t['id']}")
+                reply_input = st.text_area(
+                    "Ketik balasan untuk dikirim langsung ke chat pelanggan...",
+                    key=f"inp_{t['id']}",
+                    placeholder="Contoh: Halo Kak, kendala konektor sedang kami cek dari sistem...",
+                )
+
+                btn_send, btn_prog, btn_res = st.columns([2, 1, 1])
+                if btn_send.button("✉️ Kirim Pesan ke Pelanggan", type="primary", use_container_width=True):
+                    if not reply_input.strip():
+                        st.error("Pesan tidak boleh kosong.")
+                    else:
+                        try:
+                            handover.send_reply(t["id"], reply_input, staff_name=staff_name)
+                            st.success(f"Pesan berhasil dikirim ke {t.get('channel')} pelanggan!")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Gagal mengirim pesan: {exc}")
+
+                if btn_prog.button("🔄 Set In Progress", use_container_width=True):
+                    try:
+                        handover.set_status(t["id"], "in_progress")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+
+                if btn_res.button("✅ Selesaikan Tiket", use_container_width=True):
+                    try:
+                        handover.resolve(t["id"])
+                        st.success(f"Tiket #{t['id']} telah diselesaikan!")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
 
 with tab_kb:
     st.subheader("📚 Knowledge Base & Semantic Search (RAG)")

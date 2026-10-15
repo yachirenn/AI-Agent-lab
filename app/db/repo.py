@@ -737,13 +737,90 @@ def ticket_queue() -> list[dict[str, Any]]:
     with tx() as conn:
         return conn.execute(
             """
-            SELECT t.id, t.level, t.category, t.status, t.source, t.created_at,
-                   t.notified_at IS NOT NULL AS alerted, c.customer_code, c.name, t.summary
+            SELECT t.id, t.customer_id, t.level, t.category, t.status, t.source, t.created_at,
+                   t.notified_at IS NOT NULL AS alerted, c.customer_code, c.name, t.summary,
+                   COALESCE(
+                     (SELECT channel FROM conversations WHERE customer_id = c.id ORDER BY id DESC LIMIT 1),
+                     (SELECT channel FROM customer_identities WHERE customer_id = c.id ORDER BY id DESC LIMIT 1),
+                     'telegram'
+                   ) AS channel,
+                   COALESCE(
+                     (SELECT external_id FROM customer_identities ci 
+                      WHERE ci.customer_id = c.id 
+                        AND ci.channel = (SELECT channel FROM conversations WHERE customer_id = c.id ORDER BY id DESC LIMIT 1)
+                      LIMIT 1),
+                     (SELECT external_id FROM customer_identities ci WHERE ci.customer_id = c.id ORDER BY id DESC LIMIT 1)
+                   ) AS recipient
             FROM cs_tickets t JOIN customers c ON c.id = t.customer_id
             WHERE t.status <> 'resolved'
             ORDER BY t.level DESC, t.created_at
             """
         ).fetchall()
+
+
+def get_ticket(ticket_id: int) -> dict[str, Any] | None:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT t.id, t.customer_id, t.level, t.category, t.status, t.source, t.created_at,
+                   t.notified_at IS NOT NULL AS alerted, c.customer_code, c.name, t.summary,
+                   COALESCE(
+                     (SELECT channel FROM conversations WHERE customer_id = c.id ORDER BY id DESC LIMIT 1),
+                     (SELECT channel FROM customer_identities WHERE customer_id = c.id ORDER BY id DESC LIMIT 1),
+                     'telegram'
+                   ) AS channel,
+                   COALESCE(
+                     (SELECT external_id FROM customer_identities ci 
+                      WHERE ci.customer_id = c.id 
+                        AND ci.channel = (SELECT channel FROM conversations WHERE customer_id = c.id ORDER BY id DESC LIMIT 1)
+                      LIMIT 1),
+                     (SELECT external_id FROM customer_identities ci WHERE ci.customer_id = c.id ORDER BY id DESC LIMIT 1)
+                   ) AS recipient
+            FROM cs_tickets t JOIN customers c ON c.id = t.customer_id
+            WHERE t.id = %s
+            """,
+            (ticket_id,),
+        ).fetchone()
+
+
+def update_ticket_status(ticket_id: int, status: str) -> bool:
+    if status not in ("open", "in_progress", "resolved"):
+        raise ValueError(f"status tidak valid: {status}")
+    with tx() as conn:
+        if status == "resolved":
+            cur = conn.execute(
+                "UPDATE cs_tickets SET status = %s, resolved_at = now() WHERE id = %s",
+                (status, ticket_id),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE cs_tickets SET status = %s, resolved_at = NULL WHERE id = %s",
+                (status, ticket_id),
+            )
+        return cur.rowcount == 1
+
+
+def customer_conversations(customer_id: Any, limit: int = 50) -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT id, channel, direction, body, created_at
+            FROM conversations
+            WHERE customer_id = %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (customer_id, limit),
+        ).fetchall()
+
+
+def has_active_handover(customer_id: Any) -> bool:
+    with tx() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM cs_tickets WHERE customer_id = %s AND status = 'in_progress' LIMIT 1",
+            (customer_id,),
+        ).fetchone()
+        return row is not None
 
 
 def upsert_knowledge_item(

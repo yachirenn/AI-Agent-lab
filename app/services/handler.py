@@ -82,6 +82,13 @@ def _handle_registered(customer: dict[str, Any], msg: InboundMessage) -> str | N
     if esc is not None:   # aturan pasti, LLM tidak dilibatkan
         return escalation.process(customer, esc, msg.text)
 
+    # Tiket sedang ditangani staf manusia: tahan respons otomatis AI
+    if repo.has_active_handover(customer["id"]):
+        return (
+            "Pesan Anda telah kami teruskan ke staf CS Enerva yang sedang menangani tiket Anda. "
+            "Staf kami akan segera membalas di sini."
+        )
+
     recent = repo.count_recent_inbound(customer["id"], RATE_WINDOW_SECONDS)   # sudah termasuk pesan ini
     limit = int(os.environ.get("AGENT_MSGS_PER_MINUTE", "8"))
     if recent > limit:
