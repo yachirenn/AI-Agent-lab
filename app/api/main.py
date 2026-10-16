@@ -1,23 +1,35 @@
+from contextlib import asynccontextmanager
 import hmac
-import os
 import json
+import logging
+import os
 
-from fastapi import Query
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 
 from app.channels import whatsapp
-from app.logging_config import setup_logging
-from app.services import pipeline
-
 from app.db import repo
+from app.logging_config import setup_logging
 from app.schemas import ChargingEvent
-from app.services import charging
+from app.services import charging, pipeline
 from app.services.pipeline import process_update
 
 setup_logging()
+logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Enerva AI")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Kelola lifecycle resource aplikasi: inisialisasi pool saat startup dan tutup saat shutdown."""
+    logger.info("Aplikasi memulai: menginisialisasi connection pool database...")
+    repo.get_pool()
+    yield
+    logger.info("Aplikasi berhenti: menutup connection pool database secara graceful...")
+    repo.close_pool()
+
+
+app = FastAPI(title="Enerva AI", lifespan=lifespan)
+
 
 
 @app.get("/health")
