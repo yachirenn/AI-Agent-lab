@@ -52,3 +52,49 @@ def test_preference_summary_hides_small_groups():
     keys = {(r["pref_key"], r["pref_value"]) for r in staff_tools.preference_summary()}
     assert ("queue_tolerance", "low") in keys
     assert ("price_sensitivity", "high") not in keys
+
+
+def test_list_stations():
+    stations = staff_tools.list_stations()
+    assert len(stations) >= 4
+    codes = {s["code"] for s in stations}
+    assert "sunset-road" in codes
+    assert "sanur-hub" in codes
+    assert all("code" in s and "name" in s and "area" in s for s in stations)
+
+
+def test_station_performance():
+    perf = staff_tools.station_performance("sunset-road", days=30)
+    assert perf["code"] == "sunset-road"
+    assert perf["period_days"] == 30
+    assert "total_sessions" in perf
+    assert "total_kwh" in perf
+
+    with pytest.raises(ValueError, match="tidak ditemukan"):
+        staff_tools.station_performance("station-palsu")
+
+
+def test_search_knowledge_base():
+    # Insert knowledge item untuk dites
+    repo.upsert_knowledge_item(
+        slug="test-sop-charger",
+        title="SOP Penanganan Charger",
+        category="troubleshooting",
+        content="Bila kabel charger macet gunakan pin manual",
+        metadata={"tested": True},
+    )
+    res = staff_tools.search_knowledge_base("kabel charger macet")
+    assert len(res) >= 1
+    assert any(r["slug"] == "test-sop-charger" for r in res)
+
+
+def test_churn_risk_analysis():
+    _, cid = _customer()
+    _sessions(cid, [1, 2, 3, 4, 5])
+    code = repo.get_customer(cid)["customer_code"]
+
+    analysis = staff_tools.churn_risk_analysis(code)
+    assert analysis["customer_code"] == code
+    assert "churn_risk" in analysis
+    assert "absence_ratio" in analysis
+    assert "recommended_action" in analysis
