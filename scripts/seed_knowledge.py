@@ -56,7 +56,53 @@ ARTICLES: list[dict[str, Any]] = [
         "metadata": {"station_code": "sunset-road", "charger_types": ["DC 120kW", "DC 60kW", "AC 22kW"]},
     },
     {
+        "slug": "jam-operasional-sanur-hub",
+        "title": "Jam Operasional & Fasilitas Stasiun Sanur Port Hub",
+        "category": "station",
+        "content": (
+            "Stasiun Enerva Sanur Port Hub berlokasi di Jl. Bypass Ngurah Rai No. 12, Sanur, Denpasar Selatan (dekat dermaga Sanur). "
+            "Beroperasi selama 24 jam setiap hari dengan 2 unit DC Fast Charger 120 kW (CCS2) dan 1 unit AC Charger 22 kW (Type 2). "
+            "Fasilitas mencakup driver lounge ber-AC, toilet bersih, dispenser air minum, Wi-Fi gratis, serta lokasi bersebelahan dengan minimarket 24 jam."
+        ),
+        "metadata": {"station_code": "sanur-hub", "open_hours": "24/7", "charger_types": ["DC 120kW", "AC 22kW"]},
+    },
+    {
+        "slug": "jam-operasional-ubud-central",
+        "title": "Jam Operasional & Fasilitas Stasiun Ubud Monkey Forest",
+        "category": "station",
+        "content": (
+            "Stasiun Enerva Ubud Monkey Forest berlokasi di Jl. Wenara Wana, Padangtegal, Ubud, Gianyar. "
+            "Beroperasi pukul 06.00 hingga 23.00 WITA. Dilengkapi 1 unit DC Fast Charger 60 kW (CCS2) dan 2 unit AC Charger 22 kW (Type 2). "
+            "Menyediakan area istirahat terbuka bernuansa asri pedesaan Ubud, Wi-Fi gratis, toilet, serta kedai kopi lokal mitra Enerva."
+        ),
+        "metadata": {"station_code": "ubud-central", "open_hours": "06:00-23:00", "charger_types": ["DC 60kW", "AC 22kW"]},
+    },
+    {
+        "slug": "jam-operasional-canggu-coastal",
+        "title": "Jam Operasional & Fasilitas Stasiun Canggu Shortcut",
+        "category": "station",
+        "content": (
+            "Stasiun Enerva Canggu Shortcut berlokasi di Jl. Pantai Berawa No. 45, Canggu, Kuta Utara. "
+            "Beroperasi 24 jam setiap hari. Menyediakan 2 unit DC Ultra-Fast Charger 120 kW (CCS2) dan 1 unit AC Charger 22 kW. "
+            "Fasilitas lengkap: coworking lounge ber-AC, koneksi internet Wi-Fi gigabit, cafe, musholla, dan area parkir luas."
+        ),
+        "metadata": {"station_code": "canggu-coastal", "open_hours": "24/7", "charger_types": ["DC 120kW", "AC 22kW"]},
+    },
+    {
+        "slug": "jam-operasional-airport-hub",
+        "title": "Jam Operasional & Fasilitas Stasiun Ngurah Rai Hub",
+        "category": "station",
+        "content": (
+            "Stasiun Enerva Ngurah Rai Hub berlokasi di Jl. Raya Tuban No. 1, berdekatan dengan Bandara Internasional I Gusti Ngurah Rai. "
+            "Beroperasi 24 jam nonstop untuk melayani armada taksi listrik, rental, dan kendaraan pribadi. "
+            "Dilengkapi 2 unit DC Ultra-Fast Charger 180 kW (CCS2) pengisian super cepat dan 2 unit AC 22 kW. "
+            "Fasilitas: shower room/kamar mandi pengemudi, rest area express, musholla, dan kantin pengemudi."
+        ),
+        "metadata": {"station_code": "airport-hub", "open_hours": "24/7", "charger_types": ["DC 180kW", "AC 22kW"]},
+    },
+    {
         "slug": "tarif-dan-biaya-charging",
+
         "title": "Tarif Pengisian Daya dan Biaya per kWh",
         "category": "pricing",
         "content": (

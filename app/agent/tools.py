@@ -98,6 +98,20 @@ class Tool:
     run: Callable[[ToolContext, dict[str, Any]], dict[str, Any]]
 
 
+def _list_stations(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    area = args.get("area")
+    if area and str(area).strip():
+        stations = repo.find_stations_by_area(str(area).strip())
+    else:
+        stations = repo.list_stations()
+    return {
+        "stations": [
+            {"code": s["code"], "name": s["name"], "area": s["area"]}
+            for s in stations
+        ]
+    }
+
+
 _NO_ARGS = {"type": "object", "properties": {}}
 
 TOOLS: dict[str, Tool] = {
@@ -110,6 +124,20 @@ TOOLS: dict[str, Tool] = {
             "Riwayat sesi charging terakhir customer yang sedang chat.",
             {"type": "object", "properties": {"limit": {"type": "integer", "description": "Jumlah sesi, 1-10"}}},
             _recent_sessions,
+        ),
+        Tool(
+            "list_stations",
+            "Daftar seluruh stasiun pengisian kendaraan listrik Enerva atau cari berdasarkan area (misal: Kuta, Sanur, Ubud, Canggu, Airport/Tuban).",
+            {
+                "type": "object",
+                "properties": {
+                    "area": {
+                        "type": "string",
+                        "description": "Nama area atau kota untuk filter stasiun (opsional, contoh: 'Sanur', 'Ubud', 'Canggu', 'Kuta')",
+                    }
+                },
+            },
+            _list_stations,
         ),
         Tool(
             "search_faq",
@@ -138,4 +166,4 @@ TOOLS: dict[str, Tool] = {
             _my_preferences,
         ),
     ]
-}
+}

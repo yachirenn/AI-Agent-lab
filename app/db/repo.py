@@ -151,6 +151,71 @@ def tx() -> Iterator[Connection]:
         yield conn
 
 
+def close_pool() -> None:
+    """Tutup pool koneksi database secara graceful saat aplikasi shutdown."""
+    global _pool
+    if _pool is not None:
+        try:
+            _pool.close()
+        finally:
+            _pool = None
+
+
+def list_stations() -> list[dict[str, Any]]:
+    """Daftar semua stasiun pengisian Enerva."""
+    with tx() as conn:
+        return conn.execute("SELECT id, code, name, area FROM stations ORDER BY name").fetchall()
+
+
+def get_station_by_code(code: str) -> dict[str, Any] | None:
+    """Ambil data stasiun berdasarkan kode unik stasiun."""
+    with tx() as conn:
+        return conn.execute(
+            "SELECT id, code, name, area FROM stations WHERE code = %s",
+            (code,),
+        ).fetchone()
+
+
+def find_stations_by_area(area: str) -> list[dict[str, Any]]:
+    """Cari stasiun berdasarkan area atau nama stasiun (pencarian leksikal fleksibel)."""
+    with tx() as conn:
+        return conn.execute(
+            "SELECT id, code, name, area FROM stations WHERE area ILIKE %s OR name ILIKE %s ORDER BY name",
+            (f"%{area}%", f"%{area}%"),
+        ).fetchall()
+
+
+def station_performance(station_code: str, days: int = 30) -> dict[str, Any] | None:
+    """Metrik analitik stasiun pengisian untuk staf: jumlah sesi, total kWh, pendapatan, dan jumlah pelanggan unik."""
+    with tx() as conn:
+        st = conn.execute("SELECT id, code, name, area FROM stations WHERE code = %s", (station_code,)).fetchone()
+        if not st:
+            return None
+        stats = conn.execute(
+            """
+            SELECT count(*)::int AS total_sessions,
+                   COALESCE(sum(kwh), 0)::float AS total_kwh,
+                   COALESCE(sum(amount_idr), 0)::int AS total_revenue_idr,
+                   count(DISTINCT customer_id)::int AS unique_customers
+            FROM charging_sessions
+            WHERE station_id = %s AND started_at > now() - %s * interval '1 day'
+            """,
+            (st["id"], days),
+        ).fetchone()
+        return {
+            "code": st["code"],
+            "name": st["name"],
+            "area": st["area"],
+            "period_days": days,
+            "total_sessions": stats["total_sessions"],
+            "total_kwh": round(stats["total_kwh"], 2),
+            "total_revenue_idr": stats["total_revenue_idr"],
+            "unique_customers": stats["unique_customers"],
+        }
+
+
+
+
 def _find_by_identity(conn: Connection, channel: str, external_id: str) -> dict[str, Any] | None:
     return conn.execute(
         """
@@ -984,3 +1049,65 @@ def preference_summary() -> list[dict[str, Any]]:
             "SELECT pref_key, pref_value, count(*)::int AS customers FROM customer_preferences "
             "GROUP BY 1, 2 ORDER BY 1, 3 DESC"
         ).fetchall()
+        
+def create_reply_draft(ticket_id: int, body: str, drafted_by: str) -> int:
+    with tx() as conn:
+        open_ticket = conn.execute(
+            "SELECT 1 FROM cs_tickets WHERE id = %s AND status <> 'resolved'", (ticket_id,)
+        ).fetchone()
+        if open_ticket is None:
+            raise LookupError("tiket tidak ditemukan atau sudah selesai")
+        pending = conn.execute(
+            "SELECT count(*)::int AS n FROM reply_drafts WHERE ticket_id = %s AND status = 'pending'", (ticket_id,)
+        ).fetchone()["n"]
+        if pending >= 5:
+            raise ValueError("terlalu banyak draf menunggu untuk tiket ini")
+        draft = conn.execute(
+            "INSERT INTO reply_drafts (ticket_id, body, drafted_by) VALUES (%s, %s, %s) RETURNING id",
+            (ticket_id, body, drafted_by),
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO ticket_events (ticket_id, actor, action, detail) VALUES (%s, %s, 'draft_reply', %s)",
+            (ticket_id, drafted_by, f"draft:{draft['id']}"),
+        )
+        return draft["id"]
+
+
+def pending_drafts() -> list[dict[str, Any]]:
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT d.id, d.ticket_id, d.body, d.drafted_by, d.created_at, c.customer_code, t.category
+            FROM reply_drafts d
+            JOIN cs_tickets t ON t.id = d.ticket_id
+            JOIN customers c ON c.id = t.customer_id
+            WHERE d.status = 'pending' ORDER BY d.id
+            """
+        ).fetchall()
+
+
+def decide_draft(draft_id: int, approve: bool, actor: str) -> dict[str, Any] | None:
+    """Klaim atomik: hanya satu pemanggil yang berhasil. None = sudah diputuskan orang lain."""
+    with tx() as conn:
+        return conn.execute(
+            "UPDATE reply_drafts SET status = %s, decided_by = %s, decided_at = now() "
+            "WHERE id = %s AND status = 'pending' RETURNING id, ticket_id, body",
+            ("approved" if approve else "rejected", actor, draft_id),
+        ).fetchone()
+
+
+def reopen_draft(draft_id: int) -> None:
+    with tx() as conn:
+        conn.execute(
+            "UPDATE reply_drafts SET status = 'pending', decided_by = NULL, decided_at = NULL "
+            "WHERE id = %s AND status = 'approved'",
+            (draft_id,),
+        )
+
+
+def log_ticket_event(ticket_id: int, actor: str, action: str, detail: str | None = None) -> None:
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO ticket_events (ticket_id, actor, action, detail) VALUES (%s, %s, %s, %s)",
+            (ticket_id, actor, action, detail),
+        )
