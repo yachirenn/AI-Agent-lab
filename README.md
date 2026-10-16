@@ -225,6 +225,9 @@ Terapkan berkas migrasi database secara berurutan:
 # app/db/migrations/003_escalation.sql
 # app/db/migrations/004_inactivity.sql
 # app/db/migrations/005_knowledge_base.sql
+# app/db/migrations/006_preferences.sql
+# app/db/migrations/007_outbox.sql
+# app/db/migrations/008_multi_stations.sql
 ```
 
 ### 5. Seeding Data Knowledge Base (RAG)
@@ -269,12 +272,25 @@ Jika menguji Telegram di komputer lokal tanpa public IP / tunnel:
 python -m scripts.poll
 ```
 
+### F. Enerva MCP Server (Model Context Protocol)
+Menghubungkan ekosistem Enerva dengan AI desktop staf (Claude Desktop, Cursor, Antigravity IDE):
+```powershell
+# Jalankan server MCP (stdio transport)
+mcp run scripts/mcp_server.py
+
+# Atau inspeksi interaktif via MCP Dev Inspector
+mcp dev scripts/mcp_server.py
+```
+* **Tools (11 Tools)**: `overview`, `list_stations`, `station_performance`, `list_inactive_customers`, `open_tickets`, `customer_360`, `churn_risk_analysis`, `preference_summary`, `search_knowledge_base`, `reply_ticket`, `resolve_ticket`.
+* **Resources (3 URIs)**: `enerva://stations`, `enerva://kpis/overview`, `enerva://sop/emergency`.
+* **Prompts (3 Templates)**: `incident_triage`, `daily_executive_standup`, `customer_retention_pitch`.
+
 ---
 
 ## 🧪 Pengujian & Evaluasi
 
 ### Menjalankan Automated Test Suite (Pytest)
-Proyek ini dilengkapi **116 skenario pengujian otomatis** yang mencakup pengujian konkurensi, idempotensi, race conditions, formula finansial, RAG search, dan live handover:
+Proyek ini dilengkapi **140 skenario pengujian otomatis** yang mencakup pengujian konkurensi, idempotensi, race conditions, formula finansial, RAG search, live handover, multi-station, dan MCP server:
 ```powershell
 pytest
 ```
@@ -290,3 +306,4 @@ Hasil evaluasi akan disimpan otomatis dalam format JSON di direktori `evals/resu
 
 ## 📜 Lisensi
 Dikembangkan untuk ekosistem operasional stasiun pengisian kendaraan listrik Enerva.
+

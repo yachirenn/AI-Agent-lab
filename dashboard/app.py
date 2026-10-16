@@ -37,8 +37,10 @@ def require_login() -> None:
     st.stop()
 
 
-def fmt(dt: datetime | None) -> str:
-    return dt.astimezone(WIB).strftime("%d %b %Y %H:%M") if dt else "-"
+def fmt(dt):
+    if pd.isna(dt) or dt is None:
+        return "-"
+    return dt.astimezone(WIB).strftime("%d %b %Y %H:%M")
 
 
 def pct(part: int, whole: int) -> str:
@@ -58,9 +60,36 @@ def load_overview(days: int):
 
 require_login()
 st.title("⚡ Enerva Customer Intelligence")
-tab_overview, tab_customers, tab_inactive, tab_tickets, tab_kb = st.tabs(
-    ["Ringkasan", "Customer 360°", "Inaktivitas", "Antrean CS", "Knowledge Base (RAG)"]
+tab_overview, tab_customers, tab_inactive, tab_tickets, tab_kb, tab_approvals = st.tabs(
+    ["Ringkasan", "Customer 360°", "Inaktivitas", "Antrean CS", "Knowledge Base (RAG)", "Persetujuan Balasan"]
 )
+
+with tab_approvals:
+    approver = st.text_input("Nama Anda (tercatat di audit)", max_chars=40, key="approver")
+    drafts = repo.pending_drafts()
+    if not drafts:
+        st.success("Tidak ada draf menunggu.")
+    for d in drafts:
+        st.markdown(f"**Tiket #{d['ticket_id']}** · {d['customer_code']} · {d['category']} · draf oleh `{d['drafted_by']}`")
+        st.text(d["body"])      # teks biasa, bukan markdown atau HTML
+        ok, no = st.columns(2)
+        if ok.button("Setujui & kirim", key=f"ok{d['id']}", disabled=not approver.strip()):
+            claimed = repo.decide_draft(d["id"], True, approver.strip())
+            if claimed is None:
+                st.warning("Draf ini sudah diputuskan.")
+            else:
+                try:
+                    handover.send_reply(claimed["ticket_id"], claimed["body"], staff_name=approver.strip())
+                except handover.HandoverError as exc:
+                    repo.reopen_draft(claimed["id"])
+                    st.error(f"Gagal terkirim: {exc}")
+                else:
+                    repo.log_ticket_event(claimed["ticket_id"], approver.strip(), "approved_reply", f"draft:{claimed['id']}")
+                    st.rerun()
+        if no.button("Tolak", key=f"no{d['id']}", disabled=not approver.strip()):
+            if (claimed := repo.decide_draft(d["id"], False, approver.strip())):
+                repo.log_ticket_event(claimed["ticket_id"], approver.strip(), "rejected_reply", f"draft:{claimed['id']}")
+                st.rerun()
 
 with tab_overview:
     days = st.select_slider("Periode (hari terakhir)", options=[7, 14, 30, 60, 90], value=30)
