@@ -186,7 +186,7 @@ copy .env.example .env
 Lalu lengkapi konfigurasi variabel lingkungan:
 ```env
 # Database PostgreSQL
-DATABASE_URL=postgresql://enerva:password@localhost:5432/enerva
+DATABASE_URL=postgresql://enerva:GANTI_DENGAN_PASSWORD@localhost:5432/enerva
 
 # Telegram Bot
 TELEGRAM_BOT_TOKEN=token_dari_botfather
