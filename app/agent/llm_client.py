@@ -59,7 +59,7 @@ class GeminiClient:
         body: dict[str, Any] = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": _to_contents(messages),
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 600},
+            "generationConfig": {"temperature": 0.6, "maxOutputTokens": 1000},
         }
         if tools:
             body["tools"] = [{"functionDeclarations": tools}]
@@ -121,6 +121,8 @@ _OPENAI_COMPAT = {
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", "GROQ_MODEL"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"),
     "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", "CEREBRAS_MODEL"),
+    "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY", "OPENAI_MODEL"),
+    "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"),
 }
 
 
@@ -132,6 +134,11 @@ def get_llm() -> LLMClient:
         if name == "gemini":
             if os.environ.get("GEMINI_API_KEY") and os.environ.get("LLM_MODEL"):
                 clients.append((name, GeminiClient(os.environ["GEMINI_API_KEY"], os.environ["LLM_MODEL"])))
+        elif name in ("gemini_backup", "gemini2"):
+            key = os.environ.get("GEMINI_API_KEY_BACKUP") or os.environ.get("GEMINI_API_KEY_2")
+            model = os.environ.get("GEMINI_MODEL_BACKUP") or os.environ.get("LLM_MODEL")
+            if key and model:
+                clients.append((name, GeminiClient(key, model)))
         elif name == "ollama":
             if os.environ.get("OLLAMA_MODEL"):
                 url = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
@@ -151,15 +158,23 @@ class OpenAICompatClient:
     def __init__(self, name: str, base_url: str, api_key: str | None, model: str, timeout: float = 30.0) -> None:
         self.name, self._url, self._model = name, base_url.rstrip("/") + "/chat/completions", model
         self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        if name == "openrouter":
+            self._headers["HTTP-Referer"] = os.environ.get("OPENROUTER_REFERER", "https://github.com/enerva/ai-agent-lab")
+            self._headers["X-Title"] = "Enerva AI Concierge"
         self._http = httpx.Client(timeout=timeout)
 
     def chat(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
         body: dict[str, Any] = {
-            "model": self._model,
             "messages": [{"role": "system", "content": system}, *_to_openai(messages)],
-            "temperature": 0.2,
-            "max_tokens": 600,
+            "temperature": 0.6,
+            "max_tokens": 1000,
         }
+        if "," in self._model:
+            model_list = [m.strip() for m in self._model.split(",") if m.strip()]
+            body["models"] = model_list
+            body["model"] = model_list[0]
+        else:
+            body["model"] = self._model
         if tools:
             body["tools"] = [{"type": "function", "function": t} for t in tools]
         try:
@@ -167,7 +182,15 @@ class OpenAICompatClient:
         except httpx.HTTPError as exc:
             raise LLMError(f"{self.name}: koneksi gagal ({type(exc).__name__})") from None
         if resp.status_code != 200:
-            raise LLMError(f"{self.name}: HTTP {resp.status_code}")
+            detail = ""
+            try:
+                err_data = resp.json()
+                if isinstance(err_data, dict):
+                    err_obj = err_data.get("error")
+                    detail = err_obj.get("message", "") if isinstance(err_obj, dict) else str(err_obj or "")
+            except Exception:
+                detail = resp.text[:200]
+            raise LLMError(f"{self.name}: HTTP {resp.status_code} ({detail[:200]})")
         try:
             msg = resp.json()["choices"][0]["message"]
             calls = []
