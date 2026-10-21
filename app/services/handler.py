@@ -11,14 +11,18 @@ import os
 from app.services import escalation, preferences, registration   # gabungkan dengan import registration yang sudah ada
 
 RATE_WINDOW_SECONDS = 60
-RATE_REPLY = "Pesan Anda terlalu cepat. Mohon tunggu sebentar sebelum mengirim pesan berikutnya."
+RATE_REPLY = "Wah, santai sejenak Kak! ⏳ Pesan masuk sedikit terlalu cepat nih. Mohon tunggu beberapa detik sebelum mengirim pesan berikutnya ya."
 
 _CONSENT_COMMANDS = {"/stop": False, "/subscribe": True}
 STOP_REPLY = (
-    "Baik, Anda tidak akan menerima pesan promo lagi. "
-    "Pesan layanan seperti struk charging dan notifikasi poin tetap kami kirim."
+    "Baik Kak, Anda tidak akan menerima info promo lagi ya. 🙏\n"
+    "Namun struk charging dan info keamanan penting tetap akan kami kirimkan demi kenyamanan transaksi Kakak. "
+    "Kapan pun ingin dapat info promo menarik lagi, cukup ketik /subscribe saja ya Kak!"
 )
-SUBSCRIBE_REPLY = "Terima kasih, Anda akan menerima info promo dan reward Enerva. Balas /stop kapan saja untuk berhenti."
+SUBSCRIBE_REPLY = (
+    "Asyik! Info promo tarif kWh, voucher diskon, dan program reward Enerva sudah aktif kembali untuk Kakak. 🎁⚡\n"
+    "Ketik /stop kapan saja bila Kakak ingin berhenti berlangganan."
+)
 
 _PRIVACY_COMMANDS = {"/preferensi", "/lupa", "/ingat"}
 
@@ -130,7 +134,9 @@ def _route(customer: dict[str, Any], msg: InboundMessage) -> str | None:
 
     if next_state == "done":
         return (
-            f"Terima kasih, {customer['name']}! Pendaftaran selesai.\n"
-            f"Customer ID Anda: {customer['customer_code']}"
+            f"Hore, pendaftaran berhasil! Selamat bergabung di Enerva, Kak {customer['name']}! 🎉⚡\n\n"
+            f"Customer ID Anda: {customer['customer_code']}\n\n"
+            f"Mulai sekarang, setiap pengisian daya di stasiun Enerva akan otomatis mengumpulkan poin loyalitas Kakak. "
+            f"Kakak juga bisa langsung tanya apa saja ke saya di sini: cek lokasi stasiun, cek saldo poin, tarif kWh, sampai fasilitas lounge kami. Ada yang ingin dibantu sekarang, Kak?"
         )
     return registration.PROMPTS[next_state]

@@ -7,19 +7,35 @@ ORDER = ("ask_name", "ask_vehicle", "ask_driver_type", "ask_area", "ask_route", 
 
 PROMPTS = {
     "ask_name": (
-        "Halo, selamat datang di Enerva ⚡\n"
-        "Data yang Anda isi dipakai untuk layanan charging, poin, dan notifikasi Enerva.\n\n"
-        "Siapa nama Anda?"
+        "Halo Kak, selamat datang di Enerva SPKLU! ⚡🚗\n"
+        "Senang banget bisa menyapa Kakak. Supaya proses pengisian daya, poin reward, dan update promo Kakak tercatat rapi, kenalan dulu yuk.\n\n"
+        "Siapa nama Anda? (Boleh sertakan nama panggilan akrab Kakak ya)"
     ),
-    "ask_vehicle": "Kendaraan apa yang Anda pakai? (contoh: BYD M6)",
+    "ask_vehicle": (
+        "Salam kenal ya, Kak! 🚗✨\n"
+        "Kalau boleh tahu, kendaraan listrik apa yang sehari-hari Kakak kendarai? (Contoh: BYD M6, Ioniq 5, Wuling Binguo, dll.)"
+    ),
     "ask_driver_type": (
-        "Apa tipe pengemudi Anda?\n"
-        "1. Ride-hailing\n2. Pribadi\n3. Armada (fleet)\n"
-        "Balas dengan angka 1-3."
+        "Keren banget mobilnya! ⚡\n"
+        "Kendaraan ini utamanya dipakai untuk keperluan apa nih Kak?\n\n"
+        "1. Ride-hailing (Taksi online / Ojol)\n"
+        "2. Pribadi (Harian / Keluarga)\n"
+        "3. Armada (fleet / Bisnis)\n\n"
+        "Cukup balas dengan angka 1, 2, atau 3 ya Kak."
     ),
-    "ask_area": "Di area mana Anda tinggal? (contoh: Jimbaran)",
-    "ask_route": "Rute utama Anda sehari-hari? (contoh: Jimbaran - Airport - Seminyak)",
-    "ask_consent": "Terakhir: boleh kami mengirim info promo dan reward lewat chat ini? Balas YA atau TIDAK.",
+    "ask_area": (
+        "Sip, dicatat! 📍\n"
+        "Domisili atau area tempat tinggal Kakak biasanya di daerah mana? (Contoh: Sanur, Kuta, Ubud, Jimbaran)"
+    ),
+    "ask_route": (
+        "Biar kami bisa merekomendasikan stasiun pengisian yang paling pas, rute utama yang biasa Kakak lewati sehari-hari ke mana saja nih? 🛣️\n"
+        "(Contoh: Jimbaran - Airport - Seminyak)"
+    ),
+    "ask_consent": (
+        "Tinggal satu langkah lagi nih, Kak! 🎉\n\n"
+        "Boleh ya kami kirimkan info promo tarif kWh, voucher diskon, dan reward poin lewat chat ini? 🎁\n"
+        "Ketik YA jika setuju, atau TIDAK jika hanya butuh struk transaksi saja."
+    ),
 }
 
 _DRIVER_TYPES = {
