@@ -185,6 +185,21 @@ def find_stations_by_area(area: str) -> list[dict[str, Any]]:
         ).fetchall()
 
 
+def upsert_station(code: str, name: str, area: str) -> dict[str, Any]:
+    """Tambah atau perbarui stasiun pengisian kendaraan listrik secara real-time."""
+    with tx() as conn:
+        return conn.execute(
+            """
+            INSERT INTO stations (code, name, area)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (code) DO UPDATE
+            SET name = EXCLUDED.name, area = EXCLUDED.area
+            RETURNING id, code, name, area
+            """,
+            (code, name, area),
+        ).fetchone()
+
+
 def station_performance(station_code: str, days: int = 30) -> dict[str, Any] | None:
     """Metrik analitik stasiun pengisian untuk staf: jumlah sesi, total kWh, pendapatan, dan jumlah pelanggan unik."""
     with tx() as conn:

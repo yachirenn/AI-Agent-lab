@@ -176,6 +176,34 @@ ARTICLES: list[dict[str, Any]] = [
         ),
         "metadata": {"emergency": True},
     },
+    {
+        "slug": "jangkauan-layanan-dan-ekspansi-wilayah",
+        "title": "Jangkauan Wilayah Operasional dan Rencana Ekspansi Jaringan Enerva",
+        "category": "station",
+        "content": (
+            "Jaringan stasiun pengisian kendaraan listrik (SPKLU) Enerva saat ini aktif melayani area Bali di 5 titik strategis: "
+            "1. Enerva Sunset Road (Kuta) - 24 Jam. "
+            "2. Enerva Canggu Shortcut (Canggu) - 24 Jam. "
+            "3. Enerva Sanur Port Hub (Sanur) - 24 Jam. "
+            "4. Enerva Ngurah Rai Hub (Tuban/Bandara) - 24 Jam. "
+            "5. Enerva Ubud Monkey Forest (Ubud) - 06.00-23.00 WITA. "
+            "Wilayah lain di luar Bali (termasuk Sleman, Yogyakarta, Solo, Semarang, Surabaya, dan Jakarta) saat ini belum memiliki stasiun pengisian aktif Enerva. "
+            "Sistem Enerva secara otomatis menghimpun data rute dan domisili pelanggan di luar Bali sebagai bahan studi kelayakan prioritas ekspansi jaringan stasiun di masa mendatang."
+        ),
+        "metadata": {"coverage": ["Bali"], "expansion_pipeline": ["Yogyakarta", "Sleman", "Surabaya", "Jakarta"]},
+    },
+    {
+        "slug": "waktu-operasional-dan-layanan-realtime",
+        "title": "Waktu Operasional Stasiun dan Monitoring Sistem Real-Time",
+        "category": "station",
+        "content": (
+            "Mayoritas stasiun Enerva (Sunset Road, Canggu, Sanur, Airport) beroperasi 24 jam penuh setiap hari, termasuk hari libur nasional, "
+            "sedangkan stasiun Ubud Monkey Forest beroperasi pukul 06.00 hingga 23.00 WITA. "
+            "Seluruh transaksi, pencatatan kWh, dan perolehan poin loyalitas diproses secara real-time langsung ke akun pelanggan setelah pengisian selesai. "
+            "Asisten virtual AI Enerva siap sedia melayani pertanyaan, bantuan teknis, dan informasi stasiun 24/7 non-stop."
+        ),
+        "metadata": {"realtime_support": True, "open_hours": "24/7"},
+    },
 ]
 
 
