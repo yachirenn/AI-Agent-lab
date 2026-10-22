@@ -86,7 +86,10 @@ class GeminiClient:
         for part in content["parts"]:
             if "functionCall" in part:
                 fc = part["functionCall"]
-                calls.append(ToolCall(fc["name"], fc.get("args") or {}))
+                args = fc.get("args")
+                if not isinstance(args, dict):
+                    raise LLMError("Gemini: argumen tool bukan objek")
+                calls.append(ToolCall(fc["name"], args))
             elif part.get("text") and not part.get("thought"):
                 texts.append(part["text"])
         return LLMResponse(text="".join(texts).strip(), tool_calls=calls, raw=content)
@@ -196,7 +199,9 @@ class OpenAICompatClient:
             calls = []
             for tc in msg.get("tool_calls") or []:
                 args = json.loads(tc["function"].get("arguments") or "{}")
-                calls.append(ToolCall(tc["function"]["name"], args if isinstance(args, dict) else {}, tc.get("id")))
+                if not isinstance(args, dict):
+                    raise LLMError(f"{self.name}: argumen tool bukan objek")
+                calls.append(ToolCall(tc["function"]["name"], args, tc.get("id")))
         except (KeyError, IndexError, ValueError, TypeError):
             raise LLMError(f"{self.name}: respons tidak valid") from None
         return LLMResponse(text=(msg.get("content") or "").strip(), tool_calls=calls, raw=None)
