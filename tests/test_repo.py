@@ -1,5 +1,7 @@
 import uuid
 
+import pytest
+
 from app.db import repo
 
 
@@ -353,3 +355,158 @@ def test_recover_dead_inbox_without_saved_result_returns_false():
 
     assert inbox["status"] == "dead"
     assert inbox["result_ready"] is False
+
+
+def test_finalize_rolls_back_outbox_when_finalization_fails(monkeypatch):
+    customer = repo.register_customer(
+        "telegram",
+        f"tg-rollback-{uuid.uuid4()}",
+    )
+    message_id = f"rollback-{uuid.uuid4()}"
+
+    assert repo.enqueue_inbox(
+        channel="telegram",
+        user_id="user-rollback",
+        chat_id="chat-rollback",
+        message_id=message_id,
+        body="Tes rollback",
+    ) is True
+
+    claimed = repo.claim_inbox(limit=10, lock_seconds=120)
+    inbox = next(
+        item for item in claimed
+        if item["message_id"] == message_id
+    )
+    inbox_id = inbox["id"]
+    claim_token = inbox["claim_token"]
+
+    assert repo.store_inbox_result(
+        inbox_id,
+        claim_token=claim_token,
+        customer_id=customer["id"],
+        reply_body="Balasan untuk tes rollback",
+    ) is True
+
+    original_enqueue = repo._enqueue
+
+    def enqueue_then_fail(conn, **kwargs):
+        original_enqueue(conn, **kwargs)
+        raise RuntimeError("Simulasi kegagalan setelah insert Outbox")
+
+    monkeypatch.setattr(repo, "_enqueue", enqueue_then_fail)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Simulasi kegagalan setelah insert Outbox",
+    ):
+        repo.finalize_stored_inbox_result(
+            inbox_id,
+            claim_token=claim_token,
+        )
+
+    with repo.tx() as conn:
+        inbox_row = conn.execute(
+            """
+            SELECT status, result_ready, customer_id, reply_body
+            FROM inbox
+            WHERE id = %s
+            """,
+            (inbox_id,),
+        ).fetchone()
+
+        outbox_count = conn.execute(
+            """
+            SELECT count(*) AS total
+            FROM outbox
+            WHERE dedup_key = %s
+            """,
+            (
+                f"inbox-reply:telegram:chat-rollback:{message_id}",
+            ),
+        ).fetchone()["total"]
+
+    assert inbox_row["status"] == "processing"
+    assert inbox_row["result_ready"] is True
+    assert inbox_row["customer_id"] == customer["id"]
+    assert inbox_row["reply_body"] == "Balasan untuk tes rollback"
+    assert outbox_count == 0
+
+def test_recover_dead_inbox_rolls_back_claim_when_finalization_fails(monkeypatch):
+    customer = repo.register_customer(
+        "telegram",
+        f"tg-recovery-rollback-{uuid.uuid4()}",
+    )
+    message_id = f"recovery-rollback-{uuid.uuid4()}"
+
+    assert repo.enqueue_inbox(
+        channel="telegram",
+        user_id="user-recovery-rollback",
+        chat_id="chat-recovery-rollback",
+        message_id=message_id,
+        body="Tes pemulihan yang gagal",
+    ) is True
+
+    claimed = repo.claim_inbox(limit=10, lock_seconds=120)
+    inbox = next(
+        item for item in claimed
+        if item["message_id"] == message_id
+    )
+    inbox_id = inbox["id"]
+    claim_token = inbox["claim_token"]
+
+    assert repo.store_inbox_result(
+        inbox_id,
+        claim_token=claim_token,
+        customer_id=customer["id"],
+        reply_body="Balasan yang harus tetap tersimpan",
+    ) is True
+
+    assert repo.fail_inbox(
+        inbox_id,
+        "Simulasi batas percobaan",
+        claim_token=claim_token,
+        attempts=6,
+        max_attempts=6,
+    ) == "dead"
+
+    original_enqueue = repo._enqueue
+
+    def enqueue_then_fail(conn, **kwargs):
+        original_enqueue(conn, **kwargs)
+        raise RuntimeError("Simulasi kegagalan saat recovery")
+
+    monkeypatch.setattr(repo, "_enqueue", enqueue_then_fail)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Simulasi kegagalan saat recovery",
+    ):
+        repo.recover_dead_inbox_result(inbox_id)
+
+    with repo.tx() as conn:
+        inbox_row = conn.execute(
+            """
+            SELECT status, result_ready, customer_id, reply_body
+            FROM inbox
+            WHERE id = %s
+            """,
+            (inbox_id,),
+        ).fetchone()
+
+        outbox_count = conn.execute(
+            """
+            SELECT count(*) AS total
+            FROM outbox
+            WHERE dedup_key = %s
+            """,
+            (
+                f"inbox-reply:telegram:"
+                f"chat-recovery-rollback:{message_id}",
+            ),
+        ).fetchone()["total"]
+
+    assert inbox_row["status"] == "dead"
+    assert inbox_row["result_ready"] is True
+    assert str(inbox_row["customer_id"]) == str(customer["id"])
+    assert inbox_row["reply_body"] == "Balasan yang harus tetap tersimpan"
+    assert outbox_count == 0

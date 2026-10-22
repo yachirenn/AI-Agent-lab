@@ -40,45 +40,88 @@ def enqueue_message(**kwargs: Any) -> bool:
 
 
 def claim_outbox(limit: int, lock_seconds: int) -> list[dict[str, Any]]:
-    """Aman dijalankan beberapa worker: baris terkunci dilewati (SKIP LOCKED).
-    Baris 'sending' yang lock-nya kedaluwarsa (worker mati) diklaim ulang."""
+    """Klaim pesan dengan fencing token agar worker lama tidak mengubah klaim baru."""
     with tx() as conn:
         return conn.execute(
             """
-            UPDATE outbox SET status = 'sending', attempts = attempts + 1,
-                   locked_until = now() + %s * interval '1 second'
+            UPDATE outbox
+            SET status = 'sending',
+                attempts = attempts + 1,
+                locked_until = now() + %s * interval '1 second',
+                claim_token = gen_random_uuid()
             WHERE id IN (
-              SELECT id FROM outbox
-              WHERE (status = 'pending' AND next_attempt_at <= now())
-                 OR (status = 'sending' AND locked_until < now())
-              ORDER BY (kind = 'staff_alert') DESC, id
-              LIMIT %s
-              FOR UPDATE SKIP LOCKED)
-            RETURNING id, kind, channel, recipient, customer_id, ticket_id, body, attempts
+                SELECT id FROM outbox
+                WHERE (status = 'pending' AND next_attempt_at <= now())
+                   OR (status = 'sending' AND locked_until < now())
+                ORDER BY (kind = 'staff_alert') DESC, id
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id, kind, channel, recipient, customer_id,
+                      ticket_id, body, attempts, claim_token
             """,
             (lock_seconds, limit),
         ).fetchall()
 
 
-def complete_outbox(outbox_id: int) -> None:
+def complete_outbox(outbox_id: int, claim_token: Any) -> bool:
+    """Selesaikan hanya klaim yang tokennya masih dimiliki worker."""
     with tx() as conn:
         row = conn.execute(
-            "UPDATE outbox SET status = 'sent', sent_at = now(), locked_until = NULL WHERE id = %s RETURNING ticket_id",
-            (outbox_id,),
+            """
+            UPDATE outbox
+            SET status = 'sent', sent_at = now(), locked_until = NULL
+            WHERE id = %s AND status = 'sending' AND claim_token = %s
+            RETURNING ticket_id
+            """,
+            (outbox_id, claim_token),
         ).fetchone()
-        if row and row["ticket_id"]:   # bukti bahwa staf benar-benar diberi tahu
-            conn.execute("UPDATE cs_tickets SET notified_at = now() WHERE id = %s", (row["ticket_id"],))
+
+        if row is None:
+            return False
+
+        if row["ticket_id"]:
+            conn.execute(
+                "UPDATE cs_tickets SET notified_at = now() WHERE id = %s",
+                (row["ticket_id"],),
+            )
+
+        return True
 
 
-def fail_outbox(outbox_id: int, error: str, *, permanent: bool, attempts: int, max_attempts: int) -> str:
+def fail_outbox(
+    outbox_id: int,
+    error: str,
+    *,
+    claim_token: Any,
+    permanent: bool,
+    attempts: int,
+    max_attempts: int,
+) -> str:
+    """Gagalkan hanya klaim yang masih dimiliki worker; kembalikan stale jika usang."""
     status = "dead" if permanent or attempts >= max_attempts else "pending"
-    delay = int(min(30 * 2 ** max(attempts - 1, 0), 1800) * random.uniform(0.8, 1.2))   # 30s, 60s, 120s ... maks 30 menit
+    delay = int(
+        min(30 * 2 ** max(attempts - 1, 0), 1800)
+        * random.uniform(0.8, 1.2)
+    )
+
     with tx() as conn:
-        conn.execute(
-            "UPDATE outbox SET status = %s, last_error = %s, locked_until = NULL, "
-            "next_attempt_at = now() + %s * interval '1 second' WHERE id = %s",
-            (status, error[:200], delay, outbox_id),
-        )
+        row = conn.execute(
+            """
+            UPDATE outbox
+            SET status = %s,
+                last_error = %s,
+                locked_until = NULL,
+                next_attempt_at = now() + %s * interval '1 second'
+            WHERE id = %s AND status = 'sending' AND claim_token = %s
+            RETURNING id
+            """,
+            (status, error[:200], delay, outbox_id, claim_token),
+        ).fetchone()
+
+        if row is None:
+            return "stale"
+
     return status
 
 
@@ -1255,6 +1298,74 @@ def store_inbox_result(
 
         return row is not None
 
+
+def _finalize_stored_inbox_result(
+    conn: Connection,
+    inbox_id: int,
+    *,
+    claim_token: Any,
+) -> bool:
+    """Finalisasi hasil tersimpan menggunakan transaksi yang sedang aktif."""
+    inbox = conn.execute(
+        """
+        SELECT
+            id,
+            channel,
+            chat_id,
+            message_id,
+            customer_id,
+            reply_body,
+            result_ready
+        FROM inbox
+        WHERE id = %s
+          AND status = 'processing'
+          AND claim_token = %s
+        FOR UPDATE
+        """,
+        (inbox_id, claim_token),
+    ).fetchone()
+
+    if inbox is None or not inbox["result_ready"]:
+        return False
+
+    if inbox["reply_body"]:
+        if inbox["customer_id"] is None:
+            raise RuntimeError(
+                f"Inbox {inbox_id} memiliki balasan tanpa customer_id"
+            )
+
+        _enqueue(
+            conn,
+            kind="reply",
+            channel=inbox["channel"],
+            recipient=inbox["chat_id"],
+            body=inbox["reply_body"],
+            customer_id=inbox["customer_id"],
+            dedup_key=(
+                f"inbox-reply:{inbox['channel']}:"
+                f"{inbox['chat_id']}:{inbox['message_id']}"
+            ),
+        )
+
+    updated = conn.execute(
+        """
+        UPDATE inbox
+        SET
+            status = 'processed',
+            processed_at = now(),
+            locked_until = NULL,
+            last_error = NULL
+        WHERE id = %s
+          AND status = 'processing'
+          AND claim_token = %s
+        RETURNING id
+        """,
+        (inbox_id, claim_token),
+    ).fetchone()
+
+    return updated is not None
+
+
 def finalize_stored_inbox_result(
     inbox_id: int,
     *,
@@ -1262,65 +1373,11 @@ def finalize_stored_inbox_result(
 ) -> bool:
     """Masukkan balasan ke Outbox dan finalisasi Inbox secara atomik."""
     with tx() as conn:
-        inbox = conn.execute(
-            """
-            SELECT
-                id,
-                channel,
-                chat_id,
-                message_id,
-                customer_id,
-                reply_body,
-                result_ready
-            FROM inbox
-            WHERE id = %s
-              AND status = 'processing'
-              AND claim_token = %s
-            FOR UPDATE
-            """,
-            (inbox_id, claim_token),
-        ).fetchone()
-
-        if inbox is None or not inbox["result_ready"]:
-            return False
-
-        if inbox["reply_body"]:
-            if inbox["customer_id"] is None:
-                raise RuntimeError(
-                    f"Inbox {inbox_id} memiliki balasan tanpa customer_id"
-                )
-
-            _enqueue(
-                conn,
-                kind="reply",
-                channel=inbox["channel"],
-                recipient=inbox["chat_id"],
-                body=inbox["reply_body"],
-                customer_id=inbox["customer_id"],
-                dedup_key=(
-                    f"inbox-reply:{inbox['channel']}:"
-                    f"{inbox['chat_id']}:{inbox['message_id']}"
-                ),
-            )
-
-        updated = conn.execute(
-            """
-            UPDATE inbox
-            SET
-                status = 'processed',
-                processed_at = now(),
-                locked_until = NULL,
-                last_error = NULL
-            WHERE id = %s
-              AND status = 'processing'
-              AND claim_token = %s
-            RETURNING id
-            """,
-            (inbox_id, claim_token),
-        ).fetchone()
-
-        return updated is not None
-
+        return _finalize_stored_inbox_result(
+            conn,
+            inbox_id,
+            claim_token=claim_token,
+        )
 def fail_inbox(
     inbox_id: int,
     error: str,
@@ -1380,6 +1437,7 @@ def fail_inbox(
 
         return row["status"]
 
+
 def recover_dead_inbox_result(inbox_id: int) -> bool:
     """Pulihkan hasil tersimpan dari Inbox dead tanpa memproses AI ulang."""
     with tx() as conn:
@@ -1399,10 +1457,18 @@ def recover_dead_inbox_result(inbox_id: int) -> bool:
             (inbox_id,),
         ).fetchone()
 
-    if row is None:
-        return False
+        if row is None:
+            return False
 
-    return finalize_stored_inbox_result(
-        inbox_id,
-        claim_token=row["claim_token"],
-    )
+        finalized = _finalize_stored_inbox_result(
+            conn,
+            inbox_id,
+            claim_token=row["claim_token"],
+        )
+
+        if not finalized:
+            raise RuntimeError(
+                f"Inbox {inbox_id} gagal difinalisasi setelah recovery."
+            )
+
+        return True

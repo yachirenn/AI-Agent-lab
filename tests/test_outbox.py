@@ -81,6 +81,7 @@ def test_stale_lock_is_reclaimed_after_worker_crash():
         conn.execute("UPDATE outbox SET locked_until = now() - interval '1 second'")
     again = repo.claim_outbox(10, 120)
     assert [r["id"] for r in again] == [first[0]["id"]] and again[0]["attempts"] == 2
+    assert first[0]["claim_token"] != again[0]["claim_token"]
 
 
 def test_concurrent_workers_never_claim_the_same_row():
@@ -109,3 +110,57 @@ def test_sweep_requeues_urgent_ticket_missing_its_alert(monkeypatch):
         conn.execute("UPDATE cs_tickets SET created_at = now() - interval '5 minutes'")
     assert alerts.sweep() == 1
     assert alerts.sweep() == 0                                              # tidak menggandakan
+
+def test_stale_claim_cannot_complete_or_fail_new_claim():
+    _enqueue()
+
+    first = repo.claim_outbox(1, 120)
+    assert len(first) == 1
+
+    outbox_id = first[0]["id"]
+    old_token = first[0]["claim_token"]
+
+    # Simulasikan lease habis, lalu worker baru mengambil alih.
+    with repo.tx() as conn:
+        conn.execute(
+            "UPDATE outbox SET locked_until = now() - interval '1 second' WHERE id = %s",
+            (outbox_id,),
+        )
+
+    second = repo.claim_outbox(1, 120)
+    assert len(second) == 1
+
+    new_token = second[0]["claim_token"]
+    assert new_token != old_token
+
+    # Worker lama tidak boleh menyelesaikan atau menggagalkan klaim baru.
+    assert repo.complete_outbox(outbox_id, old_token) is False
+
+    assert repo.fail_outbox(
+        outbox_id,
+        "error dari worker lama",
+        claim_token=old_token,
+        permanent=False,
+        attempts=first[0]["attempts"],
+        max_attempts=6,
+    ) == "stale"
+
+    with repo.tx() as conn:
+        row = conn.execute(
+            "SELECT status, claim_token FROM outbox WHERE id = %s",
+            (outbox_id,),
+        ).fetchone()
+
+    assert row["status"] == "sending"
+    assert row["claim_token"] == new_token
+
+    # Worker pemilik token terbaru masih boleh menyelesaikan pesan.
+    assert repo.complete_outbox(outbox_id, new_token) is True
+
+    with repo.tx() as conn:
+        row = conn.execute(
+            "SELECT status FROM outbox WHERE id = %s",
+            (outbox_id,),
+        ).fetchone()
+
+    assert row["status"] == "sent"
