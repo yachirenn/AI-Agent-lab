@@ -124,7 +124,7 @@ ai-agent-lab/
 │   │   ├── telegram.py        # Telegram Bot API adapter
 │   │   └── whatsapp.py        # Meta WhatsApp Cloud API adapter
 │   ├── db/                    # Data Layer & Database Repository
-│   │   ├── migrations/        # SQL Migrations (002 s/d 005)
+│   │   ├── migrations/        # SQL Migrations (002 s/d 013)
 │   │   ├── repo.py            # Single Source of Truth akses PostgreSQL
 │   │   └── schema.sql         # Skema inisial database
 │   ├── services/              # Logika Bisnis & Servis Operasional
@@ -228,6 +228,11 @@ Terapkan berkas migrasi database secara berurutan:
 # app/db/migrations/006_preferences.sql
 # app/db/migrations/007_outbox.sql
 # app/db/migrations/008_multi_stations.sql
+# app/db/migrations/009_staff_actions.sql
+# app/db/migrations/010_outbox_reply.sql
+# app/db/migrations/011_inbox.sql
+# app/db/migrations/012_inbox_result.sql
+# app/db/migrations/013_inbox_claim_token.sql
 ```
 
 ### 5. Seeding Data Knowledge Base (RAG)

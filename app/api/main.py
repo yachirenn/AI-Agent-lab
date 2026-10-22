@@ -4,15 +4,14 @@ import json
 import logging
 import os
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from app.channels import whatsapp
+from app.channels import telegram, whatsapp
 from app.db import repo
 from app.logging_config import setup_logging
 from app.schemas import ChargingEvent
-from app.services import charging, pipeline
-from app.services.pipeline import process_update
+from app.services import charging
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -40,16 +39,35 @@ def health() -> dict[str, bool]:
 @app.post("/webhook/telegram")
 async def telegram_webhook(
     request: Request,
-    background: BackgroundTasks,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ) -> dict[str, bool]:
     expected = os.environ["TELEGRAM_WEBHOOK_SECRET"].encode()
     received = (x_telegram_bot_api_secret_token or "").encode()
-    if not hmac.compare_digest(received, expected):   # waktu konstan, anti timing attack
+    if not hmac.compare_digest(received, expected):
         raise HTTPException(status_code=403)
 
-    background.add_task(process_update, await request.json())
-    return {"ok": True}   # balas cepat; Telegram me-retry jika tidak dapat 200
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400)
+
+    msg = telegram.parse_update(payload)
+    if msg is not None:
+        try:
+            repo.enqueue_inbox(
+                channel=msg.channel,
+                user_id=msg.user_id,
+                chat_id=msg.chat_id,
+                message_id=msg.message_id,
+                body=msg.text,
+                is_start=msg.is_start,
+                start_payload=msg.start_payload,
+            )
+        except Exception:
+            logger.exception("gagal menyimpan pesan Telegram ke Inbox")
+            raise HTTPException(status_code=503, detail="Inbox sementara tidak tersedia")
+
+    return {"ok": True}
   
 def require_cms_secret(x_cms_secret: str | None = Header(default=None)) -> None:
     expected = os.environ["CMS_WEBHOOK_SECRET"].encode()
@@ -93,16 +111,29 @@ def whatsapp_verify(
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(
     request: Request,
-    background: BackgroundTasks,
     x_hub_signature_256: str | None = Header(default=None),
 ) -> dict[str, bool]:
-    raw = await request.body()               # signature dihitung dari byte mentah, bukan JSON hasil parse ulang
+    raw = await request.body()
     if not whatsapp.verify_signature(raw, x_hub_signature_256):
         raise HTTPException(status_code=403)
     try:
         payload = json.loads(raw)
     except ValueError:
         raise HTTPException(status_code=400)
+
     for msg in whatsapp.parse_webhook(payload):
-        background.add_task(pipeline.process_message, msg)
-    return {"ok": True}                      # balas cepat; Meta me-retry jika tidak mendapat 200
+        try:
+            repo.enqueue_inbox(
+                channel=msg.channel,
+                user_id=msg.user_id,
+                chat_id=msg.chat_id,
+                message_id=msg.message_id,
+                body=msg.text,
+                is_start=msg.is_start,
+                start_payload=msg.start_payload,
+            )
+        except Exception:
+            logger.exception("gagal menyimpan pesan WhatsApp ke Inbox")
+            raise HTTPException(status_code=503, detail="Inbox sementara tidak tersedia")
+
+    return {"ok": True}

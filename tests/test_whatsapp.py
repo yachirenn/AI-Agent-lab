@@ -73,13 +73,32 @@ def test_webhook_rejects_bad_signature():
     assert r.status_code == 403
 
 
-def test_webhook_dispatches_signed_messages(monkeypatch):
+def test_webhook_persists_signed_messages_to_inbox(monkeypatch):
     seen = []
-    monkeypatch.setattr(pipeline, "process_message", seen.append)
+
+    def fake_enqueue(**kwargs):
+        seen.append(kwargs)
+        return True
+
+    monkeypatch.setattr(repo, "enqueue_inbox", fake_enqueue)
     raw = json.dumps(_payload()).encode()
-    r = client.post("/webhook/whatsapp", content=raw,
-                    headers={"X-Hub-Signature-256": _sign(raw), "Content-Type": "application/json"})
-    assert r.status_code == 200 and len(seen) == 1 and seen[0].start_payload == "sunset-road"
+    r = client.post(
+        "/webhook/whatsapp",
+        content=raw,
+        headers={
+            "X-Hub-Signature-256": _sign(raw),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert r.status_code == 200
+    assert len(seen) == 1
+    assert seen[0]["channel"] == "whatsapp"
+    assert seen[0]["user_id"] == "628123456789"
+    assert seen[0]["message_id"] == "wamid.1"
+    assert seen[0]["body"] == "MULAI sunset-road"
+    assert seen[0]["is_start"] is True
+    assert seen[0]["start_payload"] == "sunset-road"
 
 
 def test_first_message_is_greeting_not_a_name():
