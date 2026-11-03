@@ -70,8 +70,11 @@ def build_system_prompt(customer_id: Any) -> str:
                 vehicles = [v["model"] for v in repo.list_vehicles(customer_id)]
                 veh_str = ", ".join(vehicles) if vehicles else "Belum terdata"
                 pts = repo.get_balance(customer_id)
-                prefs = repo.list_preferences(customer_id)
-                pref_str = ", ".join(f"{p['pref_key']}={p['pref_value']}" for p in prefs) if prefs else "Standar"
+                if repo.personalization_enabled(customer_id):
+                    prefs = repo.list_preferences(customer_id)
+                    pref_str = ", ".join(f"{p['pref_key']}={p['pref_value']}" for p in prefs) if prefs else "Standar"
+                else:
+                    pref_str = "Dinonaktifkan oleh pengguna"
 
                 profile_lines.append(f"- Nama Customer: Kak {name}")
                 profile_lines.append(f"- Customer ID: {code}")
@@ -118,7 +121,7 @@ def run_agent(customer_id: Any, text: str, *, llm: LLMClient | None = None) -> s
 
 def _history(customer_id: Any, current: str) -> list[dict[str, Any]]:
     rows = repo.recent_messages(customer_id, 8)
-    if rows and rows[-1]["direction"] == "in" and rows[-1]["body"] == current:
+    if rows and rows[-1]["direction"] == "in" and rows[-1]["body"][:MAX_INPUT_CHARS] == current:
         rows = rows[:-1]   # pesan saat ini sudah tercatat di DB oleh handler
     return [
         {"role": "user" if r["direction"] == "in" else "assistant", "text": r["body"][:MAX_INPUT_CHARS], "raw": None}

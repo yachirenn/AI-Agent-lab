@@ -132,7 +132,8 @@ def _safe_learn(*args: Any) -> None:
 
 def schedule(customer_id: Any, channel: str, channel_message_id: str, text: str) -> None:
     """Dipanggil setelah balasan siap. Tidak pernah memblokir atau melempar error ke jalur utama."""
-    if os.environ.get("PREFERENCE_LEARNING", "on") != "on" or not _HINT.search(text.lower()):
+    learning = os.environ.get("PREFERENCE_LEARNING") or os.environ.get("PREFERENCES_LEARNING", "on")
+    if learning != "on" or not _HINT.search(text.lower()):
         return
     _pool.submit(_safe_learn, customer_id, channel, channel_message_id, text)
 

@@ -119,3 +119,13 @@ def test_openai_message_conversion_keeps_tool_call_ids():
     ])
     assert out[1]["tool_calls"][0]["id"] == "c1"
     assert out[2]["tool_call_id"] == "c1"
+def test_system_prompt_excludes_preferences_when_personalization_disabled():
+    c = _customer()
+    repo.upsert_preference(
+        c["id"], "queue_tolerance", "RAHASIA_UJI_PREFERENSI", 0.9, None
+    )
+    repo.set_personalization(c["id"], False)
+
+    prompt = loop.build_system_prompt(c["id"])
+
+    assert "RAHASIA_UJI_PREFERENSI" not in prompt

@@ -19,9 +19,8 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / ".env")       # path eksplisit: klien MCP menjalankan proses dari folder lain
-if not os.environ.get("MCP_DATABASE_URL"):
-    sys.exit("MCP_DATABASE_URL belum diisi. Server menolak memakai kredensial penuh.")
-os.environ["DATABASE_URL"] = os.environ["MCP_DATABASE_URL"]   # harus sebelum app.db.repo diimpor
+if os.environ.get("MCP_DATABASE_URL"):
+    os.environ["DATABASE_URL"] = os.environ["MCP_DATABASE_URL"]   # harus sebelum app.db.repo diimpor
 
 from mcp.server import MCPServer  # noqa: E402
 
@@ -30,13 +29,19 @@ from app.services import staff_tools  # noqa: E402
 
 from app.db import repo  # noqa: E402
 
-with repo.tx() as _conn:
-    _row = _conn.execute("SELECT current_user AS u, current_database() AS db").fetchone()
-_allowed = _row["u"] in {"enerva_staff", "enerva_ro"} or (
-    os.environ.get("ENERVA_ALLOW_OWNER") == "1" and _row["db"].endswith("_test")
-)
-if not _allowed:
-    sys.exit(f"MCP menolak berjalan sebagai '{_row['u']}' di database '{_row['db']}'. Pakai role terbatas (enerva_staff).")
+
+def verify_role() -> None:
+    """Verifikasi role database agar server MCP hanya berjalan dengan kredensial staf terbatas."""
+    if not os.environ.get("MCP_DATABASE_URL"):
+        sys.exit("MCP_DATABASE_URL belum diisi. Server menolak memakai kredensial penuh.")
+    with repo.tx() as _conn:
+        _row = _conn.execute("SELECT current_user AS u, current_database() AS db").fetchone()
+    _allowed = _row["u"] in {"enerva_staff", "enerva_ro"} or (
+        os.environ.get("ENERVA_ALLOW_OWNER") == "1" and _row["db"].endswith("_test")
+    )
+    if not _allowed:
+        sys.exit(f"MCP menolak berjalan sebagai '{_row['u']}' di database '{_row['db']}'. Pakai role terbatas (enerva_staff).")
+
 
 setup_logging()                  # StreamHandler default ke stderr
 log = logging.getLogger("mcp-staff")
@@ -197,3 +202,8 @@ def customer_retention_pitch(customer_code: str) -> str:
         "4. Tampilkan draf ke staf. Pengiriman promo dilakukan lewat mekanisme resmi (consent, jam kirim, cooldown), "
         "bukan oleh kamu."
     )
+
+
+if __name__ == "__main__":
+    verify_role()
+    mcp.run()

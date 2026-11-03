@@ -38,8 +38,16 @@ flowchart TD
         CHARGING["Charging Ingest (app/services/charging.py)"]
     end
 
-    WA_EP --> Pipeline
-    TG_EP --> Pipeline
+    subgraph Inbox ["Durable Inbox Pattern"]
+        INBOX_TAB[("inbox Table")]
+        INBOX_WORKER["Inbox Worker (scripts/inbox_worker.py)"]
+        INBOX_TAB --> INBOX_WORKER
+    end
+
+    WA_EP --> INBOX_TAB
+    TG_EP --> INBOX_TAB
+    INBOX_WORKER --> Pipeline
+
     CMS_EP --> CHARGING
 
     ESC -- "Level 3: Safety / Fire / Emergency" --> OUTBOX

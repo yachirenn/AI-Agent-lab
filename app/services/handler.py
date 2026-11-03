@@ -134,7 +134,7 @@ def _route(customer: dict[str, Any], msg: InboundMessage) -> str | None:
 
     if next_state == "done":
         return (
-            f"Hore, pendaftaran berhasil! Selamat bergabung di Enerva, Kak {customer['name']}! 🎉⚡\n\n"
+            f"Hore, pendaftaran berhasil! Selamat bergabung di Enerva, Kak {customer.get('name') or 'Pengemudi'}! 🎉⚡\n\n"
             f"Customer ID Anda: {customer['customer_code']}\n\n"
             f"Mulai sekarang, setiap pengisian daya di stasiun Enerva akan otomatis mengumpulkan poin loyalitas Kakak. "
             f"Kakak juga bisa langsung tanya apa saja ke saya di sini: cek lokasi stasiun, cek saldo poin, tarif kWh, sampai fasilitas lounge kami. Ada yang ingin dibantu sekarang, Kak?"

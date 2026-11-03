@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.channels import telegram
+from app.channels import telegram, whatsapp
 from app.db import repo
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,12 @@ def send_retention(now: datetime) -> int:
     cooldown = int(os.environ.get("RETENTION_COOLDOWN_DAYS", "30"))
     sent = 0
     for alert in repo.pending_retention_alerts():
+        # Utamakan Telegram, lalu WhatsApp
         chat_id = repo.get_identity(alert["customer_id"], "telegram")
+        channel = "telegram"
+        if chat_id is None:
+            chat_id = repo.get_identity(alert["customer_id"], "whatsapp")
+            channel = "whatsapp"
         if chat_id is None:
             continue
         claimed = repo.claim_retention(alert["id"], cooldown)
@@ -50,12 +55,15 @@ def send_retention(now: datetime) -> int:
             continue
         text = _message(claimed["name"])
         try:
-            telegram.send_message(chat_id, text)
+            if channel == "telegram":
+                telegram.send_message(chat_id, text)
+            else:
+                whatsapp.send_text(chat_id, text)
         except Exception:
             repo.release_retention(alert["id"])   # gagal kirim: boleh dicoba lagi besok
             logger.exception("retensi gagal alert=%s", alert["id"])
             continue
-        repo.record_message(claimed["customer_id"], "telegram", "out", text)
+        repo.record_message(claimed["customer_id"], channel, "out", text)
         sent += 1
     return sent
 

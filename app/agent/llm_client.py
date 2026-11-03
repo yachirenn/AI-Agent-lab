@@ -28,6 +28,11 @@ class ToolCall:
     args: dict[str, Any]
     id: str | None = None
 
+    def __post_init__(self) -> None:
+        if not self.id:
+            object.__setattr__(self, "id", f"call_{uuid.uuid4().hex[:12]}")
+
+
 
 @dataclass(frozen=True)
 class LLMResponse:
@@ -209,23 +214,34 @@ class OpenAICompatClient:
 
 def _to_openai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    last_assistant_calls: list[dict[str, Any]] = []
     for m in messages:
         if m["role"] == "user":
             out.append({"role": "user", "content": m["text"]})
+            last_assistant_calls = []
         elif m["role"] == "assistant" and m.get("tool_calls"):
+            calls = [
+                {"id": tc.id or f"call_{uuid.uuid4().hex[:12]}", "type": "function",
+                 "function": {"name": tc.name, "arguments": json.dumps(tc.args)}}
+                for tc in m["tool_calls"]
+            ]
+            last_assistant_calls = calls
             out.append({
                 "role": "assistant",
                 "content": m["text"] or None,
-                "tool_calls": [
-                    {"id": tc.id or f"call_{uuid.uuid4().hex[:12]}", "type": "function",
-                     "function": {"name": tc.name, "arguments": json.dumps(tc.args)}}
-                    for tc in m["tool_calls"]
-                ],
+                "tool_calls": calls,
             })
         elif m["role"] == "assistant":
             out.append({"role": "assistant", "content": m["text"]})
+            last_assistant_calls = []
         else:
-            out.append({"role": "tool", "tool_call_id": m.get("id") or "", "content": json.dumps(m["result"])})
+            tool_id = m.get("id")
+            if not tool_id and last_assistant_calls:
+                for c in last_assistant_calls:
+                    if c["function"]["name"] == m.get("name"):
+                        tool_id = c["id"]
+                        break
+            out.append({"role": "tool", "tool_call_id": tool_id or "", "content": json.dumps(m["result"])})
     return out
 
 
