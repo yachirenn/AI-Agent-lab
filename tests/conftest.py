@@ -26,13 +26,10 @@ def is_db_available() -> bool:
     global _db_available
     if _db_available is None:
         try:
-            p = urlsplit(os.environ["DATABASE_URL"])
-            host = p.hostname or "localhost"
-            port = p.port or 5432
-            s = socket.create_connection((host, port), timeout=0.5)
-            s.close()
-            _db_available = True
-        except OSError:
+            import psycopg
+            with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=1) as conn:
+                _db_available = True
+        except Exception:
             _db_available = False
     return _db_available
 

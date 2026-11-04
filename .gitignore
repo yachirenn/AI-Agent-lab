@@ -6,3 +6,5 @@ __pycache__/
 *.zip
 evals/results/
 .codegraph/
+tools/gowa/
+storages/

@@ -24,7 +24,7 @@ class WhatsAppError(RuntimeError):
 
 def verify_signature(raw_body: bytes, header: str | None) -> bool:
     """HMAC-SHA256 atas body MENTAH dengan App Secret. Tanpa secret: tolak semua (fail closed)."""
-    secret = os.environ.get("WHATSAPP_APP_SECRET", "")
+    secret = os.environ.get("WHATSAPP_APP_SECRET", "") or os.environ.get("WHATSAPP_WEBHOOK_SECRET", "")
     if not secret or not header or not header.startswith("sha256="):
         return False
     expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
@@ -36,9 +36,38 @@ def _dicts(value: Any) -> list[dict[str, Any]]:
 
 
 def parse_webhook(payload: Any) -> list[InboundMessage]:
-    """Hanya pesan teks. Status pengiriman, gambar, dan lokasi diabaikan."""
+    """Mendukung payload webhook dari GOWA (go-whatsapp-web-multidevice) dan Meta Cloud API."""
     if not isinstance(payload, dict):
         return []
+
+    # 1. Format GOWA (go-whatsapp-web-multidevice)
+    if payload.get("event") == "message" or ("payload" in payload and isinstance(payload.get("payload"), dict)):
+        p = payload.get("payload", {})
+        if p.get("is_from_me"):
+            return []  # Abaikan pesan keluar dari nomor bot sendiri agar tidak looping
+
+        sender = str(p.get("from") or p.get("sender") or "")
+        clean_sender = sender.split("@")[0].strip()
+        body = str(p.get("body") or p.get("text") or "").strip()
+        mid = str(p.get("id") or "")
+
+        if not body or not clean_sender or not mid:
+            return []
+
+        start = _START_RE.match(body)
+        return [
+            InboundMessage(
+                channel="whatsapp",
+                user_id=clean_sender,
+                chat_id=clean_sender,
+                message_id=mid,
+                text=body,
+                is_start=bool(start),
+                start_payload=start.group(1).lower() if start and start.group(1) else None,
+            )
+        ]
+
+    # 2. Format Meta Cloud API
     out: list[InboundMessage] = []
     for entry in _dicts(payload.get("entry")):
         for change in _dicts(entry.get("changes")):
@@ -62,7 +91,7 @@ def _is_permanent(status: int) -> bool:
     return 400 <= status < 500 and status not in (401, 408, 429)
 
 
-def _post(payload: dict[str, Any]) -> None:
+def _post_meta(payload: dict[str, Any]) -> None:
     token = os.environ["WHATSAPP_ACCESS_TOKEN"]
     url = f"{_GRAPH}/{os.environ['WHATSAPP_API_VERSION']}/{os.environ['WHATSAPP_PHONE_NUMBER_ID']}/messages"
     try:
@@ -78,14 +107,51 @@ def _post(payload: dict[str, Any]) -> None:
 
 
 def send_text(to: str, text: str) -> None:
-    """Teks bebas hanya diterima dalam jendela layanan (24 jam sejak pesan terakhir customer)."""
-    _post({"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text, "preview_url": False}})
+    """Mengirim pesan teks via GOWA (default) atau Meta Cloud API."""
+    provider = os.environ.get("WHATSAPP_PROVIDER", "gowa").lower()
+    if provider == "meta":
+        _post_meta({"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text, "preview_url": False}})
+        return
+
+    # Kirim via GOWA (go-whatsapp-web-multidevice)
+    gowa_url = os.environ.get("GOWA_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
+    url = f"{gowa_url}/send/message"
+
+    clean_to = to.split("@")[0].strip()
+    if clean_to.startswith("08"):
+        clean_to = "628" + clean_to[2:]
+    elif clean_to.startswith("+"):
+        clean_to = clean_to[1:]
+
+    payload = {
+        "phone": clean_to,
+        "message": text,
+    }
+    headers = {"Content-Type": "application/json"}
+    basic_user = os.environ.get("GOWA_BASIC_AUTH_USER")
+    basic_pass = os.environ.get("GOWA_BASIC_AUTH_PASS")
+    auth = (basic_user, basic_pass) if basic_user and basic_pass else None
+
+    try:
+        resp = _client.post(url, json=payload, headers=headers, auth=auth)
+    except httpx.HTTPError as exc:
+        raise WhatsAppError(f"koneksi ke GOWA gagal: {type(exc).__name__}") from None
+
+    if resp.status_code not in (200, 201):
+        raise WhatsAppError(f"GOWA HTTP {resp.status_code}: {resp.text}", permanent=_is_permanent(resp.status_code))
 
 
 def send_template(to: str, name: str, params: list[str], language: str = "id") -> None:
-    """Wajib untuk pesan yang kita mulai di luar jendela 24 jam (struk, retensi, campaign)."""
-    _post({
-        "messaging_product": "whatsapp", "to": to, "type": "template",
-        "template": {"name": name, "language": {"code": language},
-                     "components": [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}]},
-    })
+    """Wajib di Meta Cloud API untuk pesan di luar jendela 24 jam; di GOWA dikirim langsung sebagai teks."""
+    provider = os.environ.get("WHATSAPP_PROVIDER", "gowa").lower()
+    if provider == "meta":
+        _post_meta({
+            "messaging_product": "whatsapp", "to": to, "type": "template",
+            "template": {"name": name, "language": {"code": language},
+                         "components": [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}]},
+        })
+        return
+
+    # Untuk GOWA, gabungkan parameter template menjadi pesan teks biasa
+    text = " ".join(params) if params else f"[{name}]"
+    send_text(to, text)

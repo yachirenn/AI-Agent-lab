@@ -15,17 +15,30 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Database terhubung! [OK]" -ForegroundColor Green
 
 $procs = @(
-  @{ n = "poller";    a = "-m scripts.poll" },
-  @{ n = "inbox";     a = "-m scripts.inbox_worker" },
-  @{ n = "outbox";    a = "-m scripts.outbox_worker" },
-  @{ n = "api";       a = "-m uvicorn app.api.main:app --host 127.0.0.1 --port 8000" },
-  @{ n = "scheduler"; a = "-m scripts.scheduler" },
-  @{ n = "dashboard"; a = "-m streamlit run dashboard/app.py --server.address 127.0.0.1 --browser.gatherUsageStats false" }
+  @{ n = "poller";    c = "& '$py' -m scripts.poll" },
+  @{ n = "inbox";     c = "& '$py' -m scripts.inbox_worker" },
+  @{ n = "outbox";    c = "& '$py' -m scripts.outbox_worker" },
+  @{ n = "api";       c = "& '$py' -m uvicorn app.api.main:app --host 127.0.0.1 --port 8000" },
+  @{ n = "scheduler"; c = "& '$py' -m scripts.scheduler" },
+  @{ n = "dashboard"; c = "& '$py' -m streamlit run dashboard/app.py --server.address 127.0.0.1 --browser.gatherUsageStats false" }
 )
+
+$gowa = Join-Path $root "tools\gowa\whatsapp.exe"
+if (Test-Path $gowa) {
+  $procs += @{
+    n = "whatsapp"
+    c = "& '$gowa' rest --host 127.0.0.1 --port 3000 --webhook 'http://127.0.0.1:8000/webhook/whatsapp' --webhook-events 'message'"
+  }
+}
+
 foreach ($p in $procs) {
-  $cmd = "[Console]::Title = 'enerva-$($p.n)'; `$env:PYTHONUTF8 = '1'; Set-Location '$root'; & '$py' $($p.a)"
+  $cmd = "[Console]::Title = 'enerva-$($p.n)'; `$env:PYTHONUTF8 = '1'; Set-Location '$root'; $($p.c)"
   Start-Process powershell -ArgumentList "-NoExit", "-Command", $cmd
 }
-Write-Host "Berjalan: poller, inbox, outbox, api, scheduler, dashboard." -ForegroundColor Green
-Write-Host "API Docs:  http://127.0.0.1:8000/docs" -ForegroundColor Cyan
-Write-Host "Dashboard: http://127.0.0.1:8501" -ForegroundColor Cyan
+
+Write-Host "Berjalan: $($procs.n -join ', ')." -ForegroundColor Green
+Write-Host "API Docs:     http://127.0.0.1:8000/docs" -ForegroundColor Cyan
+Write-Host "Dashboard:    http://127.0.0.1:8501" -ForegroundColor Cyan
+if (Test-Path $gowa) {
+  Write-Host "WhatsApp Web: http://127.0.0.1:3000 (Scan QR code di sini)" -ForegroundColor Yellow
+}

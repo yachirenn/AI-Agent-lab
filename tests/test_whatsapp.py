@@ -113,3 +113,77 @@ def test_plain_stop_withdraws_consent():
     repo.set_marketing_consent(c["id"], True, "command")
     handler.handle_inbound(_msg(user, "stop"))
     assert repo.get_customer_by_identity("sim", user)["consent_marketing"] is False
+
+
+def test_parse_gowa_message():
+    gowa_payload = {
+        "event": "message",
+        "payload": {
+            "id": "GOWA-MSG-123",
+            "from": "628987654321@s.whatsapp.net",
+            "body": "Halo min, mau tanya stasiun Sanur",
+            "is_from_me": False,
+        },
+    }
+    msgs = whatsapp.parse_webhook(gowa_payload)
+    assert len(msgs) == 1
+    m = msgs[0]
+    assert m.channel == "whatsapp"
+    assert m.user_id == "628987654321"
+    assert m.chat_id == "628987654321"
+    assert m.message_id == "GOWA-MSG-123"
+    assert m.text == "Halo min, mau tanya stasiun Sanur"
+    assert not m.is_start
+
+
+def test_parse_gowa_ignores_own_messages():
+    gowa_payload = {
+        "event": "message",
+        "payload": {
+            "id": "GOWA-MSG-999",
+            "from": "628987654321@s.whatsapp.net",
+            "body": "Pesan bot sendiri",
+            "is_from_me": True,
+        },
+    }
+    assert whatsapp.parse_webhook(gowa_payload) == []
+
+
+def test_parse_gowa_start_payload():
+    gowa_payload = {
+        "event": "message",
+        "payload": {
+            "id": "GOWA-MSG-START",
+            "from": "628987654321@s.whatsapp.net",
+            "body": "MULAI sunset-road",
+            "is_from_me": False,
+        },
+    }
+    msgs = whatsapp.parse_webhook(gowa_payload)
+    assert len(msgs) == 1
+    assert msgs[0].is_start is True
+    assert msgs[0].start_payload == "sunset-road"
+
+
+def test_gowa_send_text_calls_correct_endpoint(monkeypatch):
+    called = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = "ok"
+
+    def fake_post(url, json, headers, auth):
+        called["url"] = url
+        called["json"] = json
+        called["headers"] = headers
+        called["auth"] = auth
+        return FakeResponse()
+
+    monkeypatch.setattr(whatsapp._client, "post", fake_post)
+    monkeypatch.setenv("WHATSAPP_PROVIDER", "gowa")
+    monkeypatch.setenv("GOWA_BASE_URL", "http://127.0.0.1:3000")
+
+    whatsapp.send_text("08123456789", "Halo Budi")
+    assert called["url"] == "http://127.0.0.1:3000/send/message"
+    assert called["json"]["phone"] == "628123456789"
+    assert called["json"]["message"] == "Halo Budi"
