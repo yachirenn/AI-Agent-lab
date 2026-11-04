@@ -128,6 +128,10 @@ def send_text(to: str, text: str) -> None:
         "message": text,
     }
     headers = {"Content-Type": "application/json"}
+    device_id = os.environ.get("GOWA_DEVICE_ID", "enerva-bot")
+    if device_id:
+        headers["X-Device-Id"] = device_id
+
     basic_user = os.environ.get("GOWA_BASIC_AUTH_USER")
     basic_pass = os.environ.get("GOWA_BASIC_AUTH_PASS")
     auth = (basic_user, basic_pass) if basic_user and basic_pass else None

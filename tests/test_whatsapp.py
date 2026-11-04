@@ -187,3 +187,4 @@ def test_gowa_send_text_calls_correct_endpoint(monkeypatch):
     assert called["url"] == "http://127.0.0.1:3000/send/message"
     assert called["json"]["phone"] == "628123456789"
     assert called["json"]["message"] == "Halo Budi"
+    assert called["headers"]["X-Device-Id"] == "enerva-bot"
