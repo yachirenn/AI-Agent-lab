@@ -2,6 +2,9 @@
 import logging
 import sys
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from app.agent.loop import run_agent
 from app.db import repo
 
