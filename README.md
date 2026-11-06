@@ -194,19 +194,34 @@ copy .env.example .env
 Lalu lengkapi konfigurasi variabel lingkungan:
 ```env
 # Database PostgreSQL
+POSTGRES_USER=enerva
+POSTGRES_PASSWORD=GANTI_DENGAN_PASSWORD
+POSTGRES_DB=enerva
 DATABASE_URL=postgresql://enerva:GANTI_DENGAN_PASSWORD@localhost:5432/enerva
+# Khusus pytest; wajib menunjuk database yang berakhiran _test.
+TEST_DATABASE_URL=postgresql://enerva:GANTI_DENGAN_PASSWORD@localhost:5432/enerva_test
 
 # Telegram Bot
 TELEGRAM_BOT_TOKEN=token_dari_botfather
 TELEGRAM_WEBHOOK_SECRET=rahasia_webhook_telegram
 STAFF_TELEGRAM_CHAT_ID=id_chat_grup_staf
 
-# WhatsApp Cloud API (Opsional)
+# WhatsApp provider
+# GOWA hanya untuk development/staging dengan nomor testing khusus.
+WHATSAPP_PROVIDER=gowa
+GOWA_BASE_URL=http://127.0.0.1:3000
+WHATSAPP_WEBHOOK_SECRET=secret_webhook_gowa_panjang
+# Meta Cloud API (opsional; gunakan saat WHATSAPP_PROVIDER=meta)
 WHATSAPP_VERIFY_TOKEN=token_verifikasi_bebas
 WHATSAPP_APP_SECRET=app_secret_dari_meta
 WHATSAPP_ACCESS_TOKEN=access_token_dari_meta
 WHATSAPP_PHONE_NUMBER_ID=phone_number_id_dari_meta
 WHATSAPP_API_VERSION=v20.0
+
+# GOWA webhook menggunakan HMAC pada X-Hub-Signature-256.
+# Endpoint GOWA: http://127.0.0.1:8000/webhook/whatsapp/gowa
+# Endpoint Meta: http://127.0.0.1:8000/webhook/whatsapp
+# Jangan gunakan nomor produksi atau broadcast dengan GOWA.
 
 # CMS Charger
 CMS_WEBHOOK_SECRET=token_rahasia_cms
@@ -225,23 +240,26 @@ Jika menggunakan Docker:
 ```powershell
 docker compose up -d
 ```
-Terapkan berkas migrasi database secara berurutan:
+
+Jalankan migration runner dari root project. Runner akan memasang `schema.sql` pada database kosong, menerapkan migration bernomor sampai 014, dan aman dijalankan ulang:
+
 ```powershell
-# Jalankan migrasi di database postgres Anda:
-# app/db/schema.sql
-# app/db/migrations/002_registration.sql
-# app/db/migrations/003_escalation.sql
-# app/db/migrations/004_inactivity.sql
-# app/db/migrations/005_knowledge_base.sql
-# app/db/migrations/006_preferences.sql
-# app/db/migrations/007_outbox.sql
-# app/db/migrations/008_multi_stations.sql
-# app/db/migrations/009_staff_actions.sql
-# app/db/migrations/010_outbox_reply.sql
-# app/db/migrations/011_inbox.sql
-# app/db/migrations/012_inbox_result.sql
-# app/db/migrations/013_inbox_claim_token.sql
+python -m scripts.migrate
 ```
+
+Untuk membuat database test lokal, pastikan database bernama `enerva_test` tersedia, lalu gunakan URL test eksplisit:
+
+```powershell
+# Sesuaikan user/password dengan instalasi PostgreSQL lokal.
+createdb enerva_test
+$env:TEST_DATABASE_URL = "postgresql://enerva:password@localhost:5432/enerva_test"
+python -m scripts.migrate
+pytest
+```
+
+`pytest` wajib menerima variabel lingkungan `TEST_DATABASE_URL` eksplisit, menolak URL yang tidak berakhiran `_test`, dan melakukan verifikasi `current_database()` sebelum mengizinkan pembersihan data destruktif (`TRUNCATE ... CASCADE`).
+
+Jika menggunakan Docker Compose dan membutuhkan database test, buat database tersebut melalui PostgreSQL container terlebih dahulu, lalu jalankan migration dengan `TEST_DATABASE_URL` yang menunjuk ke `enerva_test`.
 
 ### 5. Seeding Data Knowledge Base (RAG)
 Muat seluruh dokumen operasional resmi Enerva dan buat representasi vektor embedding-nya:
