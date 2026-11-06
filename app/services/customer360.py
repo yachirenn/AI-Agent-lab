@@ -59,6 +59,7 @@ def get(customer_code: str) -> dict[str, Any] | None:
         "points": raw["points"],
         "last_visit": last,
         "days_since_last": days_since,
+        "median_gap_days": median_days,
         "status": status,
         "churn_risk": churn_risk(
             days_since_last=days_since,

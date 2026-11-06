@@ -96,5 +96,51 @@ def test_churn_risk_analysis():
     analysis = staff_tools.churn_risk_analysis(code)
     assert analysis["customer_code"] == code
     assert "churn_risk" in analysis
-    assert "absence_ratio" in analysis
     assert "recommended_action" in analysis
+
+
+def test_absence_ratio_uses_customer_own_rhythm():
+    """Bug lama: customer360 tidak mengirim median_gap_days sehingga rasio selalu 1.0."""
+    _, cid = _customer()
+    _sessions(cid, list(range(10, 31)))   # habiskan rata-rata ~1 hari, terakhir 10 hari lalu
+    code = repo.get_customer(cid)["customer_code"]
+
+    analysis = staff_tools.churn_risk_analysis(code)
+    assert analysis["median_gap_days"] is not None
+    assert analysis["absence_ratio"] > 1
+
+
+def test_absence_ratio_is_none_without_enough_history():
+    _, cid = _customer()   # belum ada sesi: ritme tidak diketahui
+    code = repo.get_customer(cid)["customer_code"]
+
+    analysis = staff_tools.churn_risk_analysis(code)
+    assert analysis["absence_ratio"] is None
+
+
+def test_churn_recommendation_never_promotes_without_consent():
+    _, cid = _customer(consent=False)
+    _sessions(cid, list(range(10, 31)))
+    from app.services import inactivity
+    inactivity.detect()   # memicu alert terbuka -> churn_risk "high"
+    code = repo.get_customer(cid)["customer_code"]
+
+    analysis = staff_tools.churn_risk_analysis(code)
+    assert analysis["churn_risk"] == "high"
+    assert analysis["promo_consent"] is False
+    assert "tanpa promosi" in analysis["recommended_action"]
+    assert "voucher" not in analysis["recommended_action"].lower()
+    assert "diskon" not in analysis["recommended_action"].lower()
+
+
+def test_churn_recommendation_offers_no_hardcoded_discount():
+    _, cid = _customer(consent=True)
+    _sessions(cid, list(range(10, 31)))
+    from app.services import inactivity
+    inactivity.detect()
+    code = repo.get_customer(cid)["customer_code"]
+
+    analysis = staff_tools.churn_risk_analysis(code)
+    assert analysis["promo_consent"] is True
+    assert "20%" not in analysis["recommended_action"]
+    assert "voucher diskon" not in analysis["recommended_action"].lower()

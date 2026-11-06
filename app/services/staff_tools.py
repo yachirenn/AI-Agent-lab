@@ -134,16 +134,22 @@ def churn_risk_analysis(customer_code: str) -> dict[str, Any]:
     median_gap = p.get("median_gap_days")
     days_since = p.get("days_since_last")
 
-    if median_gap and days_since:
+    if median_gap and days_since is not None:
         ratio = round(days_since / max(median_gap, 1.0), 2)
     else:
-        ratio = 1.0
+        ratio = None   # data ritme belum cukup: jangan mengarang rasio
 
     risk = p.get("churn_risk", "unknown")
-    if risk == "high":
-        action = "Kirim voucher diskon pengisian daya 20% dan sapa pengemudi via WhatsApp."
+    promo_consent = bool(p.get("consent_marketing"))
+
+    # Rekomendasi promo HANYA jika customer memberi consent. Tidak ada angka diskon
+    # hardcoded: promo resmi harus berasal dari knowledge base dan disetujui staf.
+    if not promo_consent:
+        action = "Hubungi pengemudi untuk menanyakan kendala, tanpa promosi (consent marketing tidak aktif)."
+    elif risk == "high":
+        action = "Sapa pengemudi dan tawarkan program retensi resmi yang tercantum di knowledge base."
     elif risk == "medium":
-        action = "Pantau siklus pengisian berikutnya; infokan fasilitas baru di stasiun favoritnya."
+        action = "Pantau siklus pengisian berikutnya; informasikan fasilitas atau layanan baru di stasiun favoritnya."
     else:
         action = "Pengemudi aktif dan sehat; pertahankan loyalty reward rutin."
 
@@ -151,6 +157,9 @@ def churn_risk_analysis(customer_code: str) -> dict[str, Any]:
         "customer_code": code,
         "churn_risk": risk,
         "absence_ratio": ratio,
+        "median_gap_days": round(median_gap, 2) if median_gap is not None else None,
+        "days_since_last": round(days_since, 2) if days_since is not None else None,
+        "promo_consent": promo_consent,
         "total_sessions": p.get("total_sessions", 0),
         "total_kwh": round(p.get("kwh_30d", 0), 1),
         "points_balance": p.get("points", 0),
