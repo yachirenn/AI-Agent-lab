@@ -21,14 +21,16 @@ _pool: ConnectionPool | None = None
 def _enqueue(
     conn: Connection, *, kind: str, channel: str, recipient: str, body: str,
     customer_id: Any = None, ticket_id: int | None = None, dedup_key: str | None = None,
+    retention_alert_id: int | None = None,
 ) -> bool:
     cur = conn.execute(
         """
-        INSERT INTO outbox (kind, channel, recipient, customer_id, ticket_id, body, dedup_key)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO outbox
+          (kind, channel, recipient, customer_id, ticket_id, body, dedup_key, retention_alert_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (dedup_key) DO NOTHING
         """,
-        (kind, channel, recipient, customer_id, ticket_id, body, dedup_key),
+        (kind, channel, recipient, customer_id, ticket_id, body, dedup_key, retention_alert_id),
     )
     return cur.rowcount == 1
 
@@ -72,7 +74,7 @@ def complete_outbox(outbox_id: int, claim_token: Any) -> bool:
             UPDATE outbox
             SET status = 'sent', sent_at = now(), locked_until = NULL
             WHERE id = %s AND status = 'sending' AND claim_token = %s
-            RETURNING ticket_id
+            RETURNING ticket_id, retention_alert_id
             """,
             (outbox_id, claim_token),
         ).fetchone()
@@ -84,6 +86,13 @@ def complete_outbox(outbox_id: int, claim_token: Any) -> bool:
             conn.execute(
                 "UPDATE cs_tickets SET notified_at = now() WHERE id = %s",
                 (row["ticket_id"],),
+            )
+
+        # Retensi baru dianggap terkirim setelah delivery berhasil (ack), bukan sebelum.
+        if row["retention_alert_id"]:
+            conn.execute(
+                "UPDATE inactivity_alerts SET retention_sent_at = now() WHERE id = %s",
+                (row["retention_alert_id"],),
             )
 
         return True
@@ -497,41 +506,59 @@ def open_inactivity_alerts() -> list[dict[str, Any]]:
 
 
 def pending_retention_alerts() -> list[dict[str, Any]]:
+    """Alert yang boleh menerima pesan retensi: belum pernah dikirim, punya consent,
+    pendaftaran selesai, masih dalam cooldown, dan belum punya baris Outbox retensi."""
     with tx() as conn:
         return conn.execute(
             """
-            SELECT a.id, a.customer_id FROM inactivity_alerts a
+            SELECT a.id, a.customer_id, c.name FROM inactivity_alerts a
             JOIN customers c ON c.id = a.customer_id
             WHERE a.status = 'open' AND a.retention_sent_at IS NULL
               AND c.consent_marketing AND c.registration_state = 'done'
+              AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.retention_alert_id = a.id)
             ORDER BY a.id
             """
         ).fetchall()
 
 
 def claim_retention(alert_id: int, cooldown_days: int) -> dict[str, Any] | None:
-    """Klaim atomik: consent, status, dan cooldown dicek dalam SATU statement.
+    """Ambil data customer untuk alert yang boleh dikirimi retensi.
+
+    Pengecekan consent, status, dan cooldown dilakukan dalam satu statement. Fungsi ini
+    TIDAK lagi menandai `retention_sent_at`; penandaan terjadi di `complete_outbox`
+    setelah pesan benar-benar terkirim.
     None berarti tidak boleh kirim (consent dicabut, sudah dikirim, atau masih cooldown)."""
     with tx() as conn:
         return conn.execute(
             """
-            UPDATE inactivity_alerts a SET retention_sent_at = now()
-            FROM customers c
+            SELECT c.id AS customer_id, c.name
+            FROM inactivity_alerts a
+            JOIN customers c ON c.id = a.customer_id
             WHERE a.id = %s AND a.status = 'open' AND a.retention_sent_at IS NULL
-              AND c.id = a.customer_id AND c.consent_marketing AND c.registration_state = 'done'
+              AND c.consent_marketing AND c.registration_state = 'done'
+              AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.retention_alert_id = a.id)
               AND NOT EXISTS (
                 SELECT 1 FROM inactivity_alerts p
                 WHERE p.customer_id = a.customer_id
                   AND p.retention_sent_at > now() - %s * interval '1 day')
-            RETURNING c.id AS customer_id, c.name
             """,
             (alert_id, cooldown_days),
         ).fetchone()
 
 
-def release_retention(alert_id: int) -> None:
+def enqueue_retention(alert_id: int, *, channel: str, recipient: str, body: str, customer_id: Any) -> bool:
+    """Antrekan pesan retensi ke Outbox. Dedup deterministik per alert."""
     with tx() as conn:
-        conn.execute("UPDATE inactivity_alerts SET retention_sent_at = NULL WHERE id = %s", (alert_id,))
+        return _enqueue(
+            conn,
+            kind="retention",
+            channel=channel,
+            recipient=recipient,
+            body=body,
+            customer_id=customer_id,
+            dedup_key=f"retention:{alert_id}",
+            retention_alert_id=alert_id,
+        )
 
 def get_identity(customer_id: Any, channel: str) -> str | None:
     with tx() as conn:

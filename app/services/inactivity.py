@@ -5,7 +5,6 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.channels import telegram, whatsapp
 from app.db import repo
 
 logger = logging.getLogger(__name__)
@@ -37,10 +36,15 @@ def _message(name: str | None) -> str:
 
 
 def send_retention(now: datetime) -> int:
+    """Antrekan pesan retensi ke Outbox (bukan kirim langsung).
+
+    Outbox worker yang mengirim dan menandai `retention_sent_at` setelah delivery sukses,
+    sehingga proses yang mati di tengah jalan tidak lagi bisa menghilangkan pesan.
+    """
     if not in_send_window(now):
         return 0   # alert tetap 'pending', dikirim pada run berikutnya yang masuk jam kirim
     cooldown = int(os.environ.get("RETENTION_COOLDOWN_DAYS", "30"))
-    sent = 0
+    queued = 0
     for alert in repo.pending_retention_alerts():
         # Utamakan Telegram, lalu WhatsApp
         chat_id = repo.get_identity(alert["customer_id"], "telegram")
@@ -53,19 +57,19 @@ def send_retention(now: datetime) -> int:
         claimed = repo.claim_retention(alert["id"], cooldown)
         if claimed is None:
             continue
-        text = _message(claimed["name"])
         try:
-            if channel == "telegram":
-                telegram.send_message(chat_id, text)
-            else:
-                whatsapp.send_text(chat_id, text)
+            added = repo.enqueue_retention(
+                alert["id"],
+                channel=channel,
+                recipient=chat_id,
+                body=_message(claimed["name"]),
+                customer_id=claimed["customer_id"],
+            )
         except Exception:
-            repo.release_retention(alert["id"])   # gagal kirim: boleh dicoba lagi besok
-            logger.exception("retensi gagal alert=%s", alert["id"])
+            logger.exception("gagal mengantre retensi alert=%s", alert["id"])
             continue
-        repo.record_message(claimed["customer_id"], channel, "out", text)
-        sent += 1
-    return sent
+        queued += int(added)
+    return queued
 
 
 def run_once(now: datetime | None = None) -> dict[str, int]:

@@ -34,7 +34,7 @@ def send(channel: str, recipient: str, text: str) -> None:
 
 
 def _record_outbound(row: dict) -> None:
-    if row["customer_id"] and row["kind"] == "notification":
+    if row["customer_id"] and row["kind"] in ("notification", "retention"):
         try:
             repo.record_message(row["customer_id"], row["channel"], "out", row["body"])
         except Exception:

@@ -93,66 +93,100 @@ def test_alert_resolves_when_customer_returns():
 
 
 # ---------- retensi ----------
+# Retensi sekarang melewati Outbox: run_once() mengantrekan, outbox worker yang mengirim
+# dan menandai retention_sent_at hanya setelah delivery berhasil.
 
-def _capture(monkeypatch):
+def _drain_outbox(monkeypatch):
+    """Jalankan outbox worker dengan pengiriman palsu; kembalikan daftar (channel, penerima, teks)."""
+    from app.services import dispatcher
     sent = []
-    monkeypatch.setattr(inactivity.telegram, "send_message", lambda chat, text: sent.append((chat, text)))
+    monkeypatch.setattr(
+        dispatcher, "send", lambda ch, to, text: sent.append((ch, to, text))
+    )
+    dispatcher.run_once()
     return sent
 
 
-def test_retention_sent_once_to_consented(monkeypatch):
-    sent = _capture(monkeypatch)
+def _retention_rows():
+    with repo.tx() as conn:
+        return conn.execute("SELECT * FROM outbox WHERE kind = 'retention'").fetchall()
+
+
+def test_retention_is_queued_then_sent_once(monkeypatch):
     user, cid = _customer(consent=True)
     _sessions(cid, DAILY_LAST_10_DAYS_AGO)
 
     assert inactivity.run_once(NOON) == {"resolved": 0, "detected": 1, "sent": 1}
-    assert inactivity.run_once(NOON) == {"resolved": 0, "detected": 0, "sent": 0}
-    assert len(sent) == 1 and sent[0][0] == user and "/stop" in sent[0][1]
+    # Belum terkirim sebelum worker jalan, dan belum ditandai terkirim.
+    assert repo.open_inactivity_alerts()[0]["retention_sent_at"] is None
+    assert inactivity.run_once(NOON)["sent"] == 0   # dedup: tidak mengantre dua kali
+
+    sent = _drain_outbox(monkeypatch)
+    assert len(sent) == 1 and sent[0][0] == "telegram"
+    assert sent[0][1] == user and "/stop" in sent[0][2]
+    assert repo.open_inactivity_alerts()[0]["retention_sent_at"] is not None
+    assert inactivity.run_once(NOON)["sent"] == 0
+
+
+def test_retention_outbox_row_is_linked_to_alert():
+    _, cid = _customer(consent=True)
+    _sessions(cid, DAILY_LAST_10_DAYS_AGO)
+    inactivity.run_once(NOON)
+
+    (alert,) = repo.open_inactivity_alerts()
+    (row,) = _retention_rows()
+    assert row["retention_alert_id"] == alert["id"]
+    assert row["dedup_key"] == f"retention:{alert['id']}"
 
 
 def test_retention_skips_non_consented_but_keeps_alert(monkeypatch):
-    sent = _capture(monkeypatch)
     _, cid = _customer(consent=False)
     _sessions(cid, DAILY_LAST_10_DAYS_AGO)
 
     assert inactivity.run_once(NOON)["sent"] == 0
-    assert sent == []
-    assert _alerted_ids() == {cid}           # tetap tampil di dashboard untuk ditindak manusia
+    assert _drain_outbox(monkeypatch) == []   # tidak ada antrean promo
+    assert _alerted_ids() == {cid}            # tetap tampil di dashboard untuk ditindak manusia
 
 
 def test_retention_respects_quiet_hours(monkeypatch):
-    sent = _capture(monkeypatch)
     _, cid = _customer()
     _sessions(cid, DAILY_LAST_10_DAYS_AGO)
 
     assert inactivity.run_once(NIGHT)["sent"] == 0
-    assert inactivity.run_once(NOON)["sent"] == 1   # alert yang tertunda terkirim di jam wajar
-    assert len(sent) == 1
+    assert _drain_outbox(monkeypatch) == []
+    assert inactivity.run_once(NOON)["sent"] == 1   # alert yang tertunda diantrekan di jam wajar
+    assert len(_drain_outbox(monkeypatch)) == 1
 
 
 def test_retention_cooldown_between_alerts(monkeypatch):
-    sent = _capture(monkeypatch)
     _, cid = _customer()
     _sessions(cid, DAILY_LAST_10_DAYS_AGO)
     inactivity.run_once(NOON)
+    _drain_outbox(monkeypatch)               # delivery sukses -> retention_sent_at terisi
     with repo.tx() as conn:                  # simulasi: alert ditutup, customer masih absen, alert baru muncul
         conn.execute("UPDATE inactivity_alerts SET status = 'resolved'")
 
     result = inactivity.run_once(NOON)
     assert result["detected"] == 1 and result["sent"] == 0
-    assert len(sent) == 1
+    assert len(_drain_outbox(monkeypatch)) == 0
 
 
-def test_failed_send_releases_claim(monkeypatch):
-    def boom(chat, text):
-        raise RuntimeError("telegram down")
+def test_failed_retention_delivery_is_retried_not_marked_sent(monkeypatch):
+    from app.services import dispatcher
 
-    monkeypatch.setattr(inactivity.telegram, "send_message", boom)
+    def boom(*a):
+        raise dispatcher.DeliveryError("telegram down")
+
+    monkeypatch.setattr(dispatcher, "send", boom)
     _, cid = _customer()
     _sessions(cid, DAILY_LAST_10_DAYS_AGO)
 
-    assert inactivity.run_once(NOON)["sent"] == 0
-    assert repo.open_inactivity_alerts()[0]["retention_sent_at"] is None   # bisa dicoba lagi
+    assert inactivity.run_once(NOON)["sent"] == 1
+    dispatcher.run_once()
+    # Delivery gagal: retention TIDAK ditandai terkirim dan baris outbox menunggu retry.
+    assert repo.open_inactivity_alerts()[0]["retention_sent_at"] is None
+    (row,) = _retention_rows()
+    assert row["status"] == "pending" and row["attempts"] == 1
 
 
 # ---------- /stop dan /subscribe ----------
