@@ -64,6 +64,11 @@ def parse_update(update: dict[str, Any]) -> InboundMessage | None:
     )
 
 
+def send_typing(chat_id: str) -> None:
+    """Tampilkan indikator mengetik; kegagalan ditangani caller sebagai best-effort."""
+    _call("sendChatAction", chat_id=chat_id, action="typing")
+
+
 def send_message(chat_id: str, text: str) -> None:
     # Sengaja tanpa parse_mode: nama customer adalah input tak tepercaya.
     _call("sendMessage", chat_id=chat_id, text=text)

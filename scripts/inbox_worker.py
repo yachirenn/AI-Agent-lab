@@ -11,6 +11,7 @@ from app.channels.base import InboundMessage
 from app.db import repo
 from app.logging_config import setup_logging
 from app.services.handler import handle_inbound
+from app.services.presence import indicate_typing
 
 setup_logging()
 log = logging.getLogger("inbox")
@@ -71,6 +72,8 @@ def process_once() -> int:
                 start_payload=item["start_payload"],
             )
 
+            # Best-effort UX: jangan menunda atau menggagalkan agent bila presence gagal.
+            indicate_typing(msg)
             reply = handle_inbound(msg)
             customer = repo.get_customer_by_identity(
                 item["channel"], item["user_id"]

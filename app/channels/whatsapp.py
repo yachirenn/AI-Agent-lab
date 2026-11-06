@@ -22,13 +22,58 @@ class WhatsAppError(RuntimeError):
         self.permanent = permanent
 
 
-def verify_signature(raw_body: bytes, header: str | None) -> bool:
-    """HMAC-SHA256 atas body MENTAH dengan App Secret. Tanpa secret: tolak semua (fail closed)."""
-    secret = os.environ.get("WHATSAPP_APP_SECRET", "") or os.environ.get("WHATSAPP_WEBHOOK_SECRET", "")
-    if not secret or not header or not header.startswith("sha256="):
+def verify_signature(raw_body: bytes, header: str | None, secret: str | None = None) -> bool:
+    """Verifikasi HMAC-SHA256 body mentah dengan secret provider.
+
+    Ada dua mode pemakaian:
+
+    * **Mode ketat (staging/production).** Berikan ``secret`` eksplisit dari
+      ``webhook_secret(provider)``; signature hanya diterima jika cocok dengan
+      secret provider tersebut. Endpoint ``/webhook/whatsapp/gowa`` memakai mode ini.
+    * **Mode kompatibilitas (development).** ``secret=None`` mencoba seluruh secret
+      WhatsApp yang aktif dikonfigurasi, sehingga satu endpoint bisa menerima
+      webhook GOWA maupun Meta tanpa perlu memindahkan URL webhook saat berganti
+      provider. Endpoint ``/webhook/whatsapp`` memakai mode ini.
+
+    Kedua mode tetap fail closed: tanpa header ``sha256=`` yang valid, tanpa
+    secret yang terkonfigurasi, atau saat secret eksplisit kosong, selalu ditolak.
+    """
+    if not header or not header.startswith("sha256="):
         return False
-    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(header[len("sha256="):], expected)
+    received = header[len("sha256="):]
+
+    if secret is not None:
+        if not secret:
+            return False
+        expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(received, expected)
+
+    # Mode kompatibilitas (development): terima salah satu secret WhatsApp yang aktif.
+    candidates = [
+        s for s in (
+            os.environ.get("WHATSAPP_WEBHOOK_SECRET", ""),
+            os.environ.get("WHATSAPP_APP_SECRET", ""),
+        ) if s
+    ]
+    if not candidates:
+        return False
+
+    for cand in candidates:
+        expected = hmac.new(cand.encode(), raw_body, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(received, expected):
+            return True
+    return False
+
+
+def webhook_secret(provider: str) -> str:
+    """Ambil secret webhook untuk provider tertentu tanpa fallback ke provider lain."""
+    env_name = {
+        "meta": "WHATSAPP_APP_SECRET",
+        "gowa": "WHATSAPP_WEBHOOK_SECRET",
+    }.get(provider)
+    if env_name is None:
+        raise ValueError(f"provider WhatsApp tidak didukung: {provider}")
+    return os.environ.get(env_name, "")
 
 
 def _dicts(value: Any) -> list[dict[str, Any]]:
@@ -104,6 +149,58 @@ def _post_meta(payload: dict[str, Any]) -> None:
         except Exception:
             code = None
         raise WhatsAppError(f"HTTP {resp.status_code} code={code}", permanent=_is_permanent(resp.status_code))
+
+
+_PRESENCE_ACTIONS = {
+    "start": "start",
+    "stop": "stop",
+    "composing": "start",
+    "paused": "stop",
+}
+
+
+def send_chat_presence(to: str, action: str = "start") -> None:
+    """Tampilkan indikator typing GOWA untuk chat tujuan.
+
+    GOWA menerima action 'start' (mulai mengetik) atau 'stop' (selesai).
+    Fungsi ini sengaja no-op untuk provider Meta karena endpoint chat-presence
+    adalah API khusus GOWA. Kegagalan presence tidak boleh menggagalkan balasan AI.
+    """
+    if os.environ.get("WHATSAPP_PROVIDER", "gowa").lower() == "meta":
+        return
+    norm_action = _PRESENCE_ACTIONS.get(action.lower())
+    if not norm_action:
+        raise ValueError(f"action presence tidak didukung: {action}")
+
+    gowa_url = os.environ.get("GOWA_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
+    clean_to = to.split("@")[0].strip()
+    if clean_to.startswith("08"):
+        clean_to = "628" + clean_to[2:]
+    elif clean_to.startswith("+"):
+        clean_to = clean_to[1:]
+
+    headers = {"Content-Type": "application/json"}
+    device_id = os.environ.get("GOWA_DEVICE_ID", "enerva-bot")
+    if device_id:
+        headers["X-Device-Id"] = device_id
+    basic_user = os.environ.get("GOWA_BASIC_AUTH_USER")
+    basic_pass = os.environ.get("GOWA_BASIC_AUTH_PASS")
+    auth = (basic_user, basic_pass) if basic_user and basic_pass else None
+
+    try:
+        resp = _client.post(
+            f"{gowa_url}/send/chat-presence",
+            json={"phone": clean_to, "action": norm_action},
+            headers=headers,
+            auth=auth,
+        )
+    except httpx.HTTPError as exc:
+        raise WhatsAppError(f"koneksi ke GOWA gagal: {type(exc).__name__}") from None
+    if resp.status_code not in (200, 201):
+        raise WhatsAppError(
+            f"GOWA chat presence HTTP {resp.status_code}: {resp.text}",
+            permanent=_is_permanent(resp.status_code),
+        )
 
 
 def send_text(to: str, text: str) -> None:
