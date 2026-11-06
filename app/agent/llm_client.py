@@ -56,15 +56,15 @@ class LLMClient(Protocol):
 class GeminiClient:
     _URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-    def __init__(self, api_key: str, model: str, timeout: float = 30.0) -> None:
+    def __init__(self, api_key: str, model: str, timeout: float = 60.0) -> None:
         self._key, self._model = api_key, model
-        self._http = httpx.Client(timeout=timeout)
+        self._http = httpx.Client(timeout=httpx.Timeout(timeout, connect=10.0))
 
     def chat(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
         body: dict[str, Any] = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": _to_contents(messages),
-            "generationConfig": {"temperature": 0.6, "maxOutputTokens": 1000},
+            "generationConfig": {"temperature": 0.6, "maxOutputTokens": 1500},
         }
         if tools:
             body["tools"] = [{"functionDeclarations": tools}]
@@ -153,8 +153,12 @@ def get_llm() -> LLMClient:
                 clients.append((name, OpenAICompatClient(name, url, None, os.environ["OLLAMA_MODEL"], timeout=90.0)))
         elif name in _OPENAI_COMPAT:
             url, key_env, model_env = _OPENAI_COMPAT[name]
-            if os.environ.get(key_env) and os.environ.get(model_env):
-                clients.append((name, OpenAICompatClient(name, url, os.environ[key_env], os.environ[model_env])))
+            key = os.environ.get(key_env, "").strip()
+            model = os.environ.get(model_env, "").strip()
+            # Placeholder/expired-looking keys are not useful providers. Skip them
+            # so a stale optional fallback does not hide the real configuration issue.
+            if key and model and not key.startswith(("isi-", "your-", "change-me", "placeholder")):
+                clients.append((name, OpenAICompatClient(name, url, key, model)))
     if not clients:
         raise LLMError("tidak ada provider LLM yang dikonfigurasi di .env")
     logger.info("provider LLM aktif: %s", [n for n, _ in clients])
@@ -175,7 +179,7 @@ class OpenAICompatClient:
         body: dict[str, Any] = {
             "messages": [{"role": "system", "content": system}, *_to_openai(messages)],
             "temperature": 0.6,
-            "max_tokens": 1000,
+            "max_tokens": 1500,
         }
         if "," in self._model:
             model_list = [m.strip() for m in self._model.split(",") if m.strip()]
@@ -264,4 +268,6 @@ class FallbackLLM:
                 self._down_until[name] = self._clock() + self._cooldown
                 failed.append(name)
                 logger.warning("provider %s gagal: %s", name, exc)
+        if not failed:
+            raise LLMError("tidak ada provider LLM yang siap digunakan")
         raise LLMError("semua provider gagal: " + ", ".join(failed))

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 MAX_STEPS = 4
 MAX_INPUT_CHARS = 1000
-MAX_REPLY_CHARS = 1500
+MAX_REPLY_CHARS = 2500
 FALLBACK = "Maaf, asisten sedang tidak tersedia. Silakan coba lagi beberapa saat lagi."
 
 _DAYS_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
@@ -26,14 +26,14 @@ _WITA = ZoneInfo("Asia/Makassar")
 
 SYSTEM_PROMPT = """Kamu asisten AI Enerva, jaringan stasiun pengisian kendaraan listrik (SPKLU). Tugas utamamu adalah membantu customer dengan ramah, hangat, solutif, dan menyenangkan seperti teman mengobrol yang asik sekaligus petugas stasiun yang profesional.
 
-Gaya bicara & Pembawaan:
+Gaya Bicara & Format Pesan (Optimasi Chat WhatsApp):
 - Bahasa Indonesia natural, santai, akrab namun tetap sopan dan menghargai customer. Selalu sapa dengan "Kak" atau "Kak [Nama]".
-- Buat jawaban yang lengkap, jelas, mengalir, dan nyaman dibaca (sekitar 2 hingga 4 paragraf atau poin-poin terstruktur yang rapi). Jangan menjawab terlalu pendek, kaku, atau sepotong-sepotong.
-- Jawab langsung inti pertanyaan di awal, lalu lengkapi dengan detail dan tips tambahan yang berguna (misalnya: rincian fasilitas lounge ber-AC, wifi, cafe, tipe charger DC fast vs AC, atau patokan lokasi stasiun).
-- Format jawaban dengan rapi: pisahkan paragraf dengan jeda baris yang lega. Jika menyajikan daftar pilihan atau lokasi, gunakan penomoran sederhana seperti 1), 2), 3) atau baris baru. Jangan gunakan tanda markdown seperti bintang ganda (**), backtick (`), atau simbol bullet (- / * / •).
+- RINGKAS, PADAT, & TO-THE-POINT: Jawab langsung inti pertanyaan di awal. Usahakan jawaban tuntas dalam 1 hingga maksimal 2 paragraf pendek (maksimal 3-5 kalimat per paragraf). JANGAN membuat teks yang terlalu panjang atau bertele-tele (hindari 'wall of text' yang melelahkan dibaca di layar HP).
+- Jika menyajikan rincian tarif, opsi charger, langkah, atau perbandingan angka, gunakan poin-poin singkat yang rapi (gunakan penomoran sederhana 1), 2), 3) atau tanda strip -).
+- Format bersih tanpa markdown tebal: JANGAN gunakan tanda markdown seperti bintang ganda (**), backtick (`), atau pagar (#).
 - Hidupkan percakapan dengan emoji yang pas dan bersahabat (seperti ⚡, 🚗, 📍, ☕, ✨, 😊) agar suasana terasa asik, hidup, dan tidak kaku.
-- Jika customer menyapa, berterima kasih, atau mengobrol santai, tanggapi dengan ceria, hangat, dan antusias. Jika customer tampak lelah atau buru-buru, tunjukkan empati yang tulus terlebih dahulu.
-- Tutup jawaban dengan kalimat ramah yang mengundang interaksi lanjutan (misal: "Kalau lagi melintas di area sana, jangan ragu mampir ya Kak! Ada lagi yang ingin Kakak tanyakan?").
+- Jika customer menyapa, berterima kasih, atau mengobrol santai, tanggapi dengan ceria, hangat, dan antusias.
+- Tutup dengan 1 kalimat ramah yang mengundang interaksi lanjutan jika relevan (misal: "Ada lagi yang ingin Kakak tanyakan seputar stasiun Enerva?").
 
 Kejujuran dan Keamanan:
 - Data customer, saldo poin, dan riwayat charging HANYA boleh berasal dari hasil eksekusi tool. Jangan pernah menebak, mengarang angka, atau menjanjikan sesuatu di luar data tool.
@@ -76,10 +76,11 @@ def build_system_prompt(customer_id: Any) -> str:
                 else:
                     pref_str = "Dinonaktifkan oleh pengguna"
 
+                # Minimisasi data ke provider LLM: nomor customer code dan rute harian
+                # (data lokasi pribadi) tidak dikirim. Bila staf butuh, keduanya tersedia
+                # lewat dashboard/MCP.
                 profile_lines.append(f"- Nama Customer: Kak {name}")
-                profile_lines.append(f"- Customer ID: {code}")
                 profile_lines.append(f"- Domisili / Area Tinggal: {area}")
-                profile_lines.append(f"- Rute Utama Sehari-hari: {route}")
                 profile_lines.append(f"- Kendaraan Terdaftar: {veh_str}")
                 profile_lines.append(f"- Tipe Pengemudi: {driver_type}")
                 profile_lines.append(f"- Saldo Poin Loyalitas: {pts} poin")
@@ -98,7 +99,7 @@ Konteks Real-Time & Profil Customer Saat Ini:
 Panduan Rekomendasi Lokasi, Waktu, dan Jangkauan Wilayah:
 - Gunakan waktu dan tanggal real-time di atas untuk menyapa dengan tepat (pagi/siang/sore/malam) dan memastikan jam operasional stasiun.
 - Saat customer menanyakan stasiun terdekat, rute pengisian daya, atau rekomendasi tempat charging:
-  1) Perhatikan dengan saksama 'Domisili / Area Tinggal' dan 'Rute Utama Sehari-hari' pada data profil customer di atas.
+  1) Perhatikan dengan saksama 'Domisili / Area Tinggal' pada data profil customer di atas. Rute harian customer tidak tersedia; jika customer menyebutkannya di chat, gunakan informasi dari pesan itu saja.
   2) Periksa daftar stasiun Enerva yang aktif menggunakan tool list_stations atau search_faq.
   3) Jika stasiun Enerva tersedia di area domisili atau rute customer (misal: area Sunset Road/Kuta, Sanur, Ubud, Canggu, Bandara Ngurah Rai, atau stasiun baru yang tercantum di database), rekomendasikan stasiun yang paling pas beserta rincian fasilitasnya.
   4) Jika domisili atau rute customer berada di luar cakupan jaringan stasiun Enerva saat ini (misalnya customer berdomisili di Sleman, Yogyakarta, Jawa Tengah, dsb. sedangkan jaringan aktif stasiun Enerva saat ini baru berada di area Bali):
@@ -129,6 +130,27 @@ def _history(customer_id: Any, current: str) -> list[dict[str, Any]]:
     ]
 
 
+def _clean_reply(text: str, max_chars: int = MAX_REPLY_CHARS) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return FALLBACK
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    # Jika melewati batas, cari tanda akhir kalimat terdekat agar tidak terpotong di tengah kata
+    truncated = cleaned[:max_chars]
+    for delim in (". ", ".\n", "!\n", "?\n", "!", "?", ".", "\n"):
+        idx = truncated.rfind(delim)
+        if idx != -1 and idx >= int(max_chars * 0.7):
+            return truncated[: idx + len(delim.rstrip())].strip()
+
+    # Fallback: potong di spasi terakhir
+    last_space = truncated.rfind(" ")
+    if last_space != -1:
+        return truncated[:last_space].strip() + "..."
+    return truncated
+
+
 def _run(customer_id: Any, text: str, llm: LLMClient) -> str:
     ctx = tools.ToolContext(customer_id=customer_id)   # diinjeksi di sini, bukan oleh LLM
     messages = _history(customer_id, text) + [{"role": "user", "text": text}]
@@ -137,7 +159,7 @@ def _run(customer_id: Any, text: str, llm: LLMClient) -> str:
     for _ in range(MAX_STEPS):
         resp = llm.chat(system_prompt, messages, tools.declarations())
         if not resp.tool_calls:
-            return resp.text[:MAX_REPLY_CHARS] or FALLBACK
+            return _clean_reply(resp.text)
         messages.append({"role": "assistant", "text": resp.text, "tool_calls": resp.tool_calls, "raw": resp.raw})
         for call in resp.tool_calls:
             result = tools.execute(ctx, call.name, call.args)
