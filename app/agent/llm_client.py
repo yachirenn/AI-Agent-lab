@@ -128,6 +128,7 @@ _OPENAI_COMPAT = {
     # nama: (base_url, env key, env model)
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", "GROQ_MODEL"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"),
+    "wusrouter": ("https://wusrouter.com/v1", "WUSROUTER_API_KEY", "WUSROUTER_MODEL"),
     "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", "CEREBRAS_MODEL"),
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY", "OPENAI_MODEL"),
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"),
@@ -140,11 +141,12 @@ def get_llm() -> LLMClient:
     clients: list[tuple[str, LLMClient]] = []
     for name in order:
         if name == "gemini":
-            if os.environ.get("GEMINI_API_KEY") and os.environ.get("LLM_MODEL"):
-                clients.append((name, GeminiClient(os.environ["GEMINI_API_KEY"], os.environ["LLM_MODEL"])))
+            gem_model = os.environ.get("AI_GEMINI_MODEL") or os.environ.get("AI_GEMINI-MODEL") or os.environ.get("LLM_MODEL")
+            if os.environ.get("GEMINI_API_KEY") and gem_model:
+                clients.append((name, GeminiClient(os.environ["GEMINI_API_KEY"], gem_model)))
         elif name in ("gemini_backup", "gemini2"):
             key = os.environ.get("GEMINI_API_KEY_BACKUP") or os.environ.get("GEMINI_API_KEY_2")
-            model = os.environ.get("GEMINI_MODEL_BACKUP") or os.environ.get("LLM_MODEL")
+            model = os.environ.get("GEMINI_MODEL_BACKUP") or os.environ.get("AI_GEMINI_MODEL") or os.environ.get("AI_GEMINI-MODEL") or os.environ.get("LLM_MODEL")
             if key and model:
                 clients.append((name, GeminiClient(key, model)))
         elif name == "ollama":
@@ -152,7 +154,8 @@ def get_llm() -> LLMClient:
                 url = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
                 clients.append((name, OpenAICompatClient(name, url, None, os.environ["OLLAMA_MODEL"], timeout=90.0)))
         elif name in _OPENAI_COMPAT:
-            url, key_env, model_env = _OPENAI_COMPAT[name]
+            default_url, key_env, model_env = _OPENAI_COMPAT[name]
+            url = os.environ.get(f"{name.upper()}_BASE_URL", default_url)
             key = os.environ.get(key_env, "").strip()
             model = os.environ.get(model_env, "").strip()
             # Placeholder/expired-looking keys are not useful providers. Skip them

@@ -229,7 +229,7 @@ POINTS_PER_KWH=10
 
 # Model AI (Google Gemini)
 GEMINI_API_KEY=api_key_dari_google_ai_studio
-LLM_MODEL=gemini-3.5-flash-lite
+AI_GEMINI-MODEL=nama-model
 
 # Keamanan Dashboard
 DASHBOARD_PASSWORD=password_akses_dashboard_anda
