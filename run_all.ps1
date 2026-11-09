@@ -6,6 +6,24 @@ if (-not (Test-Path $py)) { throw ".venv tidak ditemukan di $root" }
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
+# GOWA bukan Python process, jadi muat variabel yang dibutuhkan dari .env ke
+# environment process ini tanpa pernah mencetak nilainya.
+$envFile = Join-Path $root ".env"
+if (Test-Path $envFile) {
+  Get-Content $envFile | ForEach-Object {
+    $line = $_.Trim()
+    if ($line -and -not $line.StartsWith("#") -and $line -match '^([^=]+)=(.*)$') {
+      $name = $matches[1].Trim()
+      $value = $matches[2].Trim()
+      if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+          ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+        $value = $value.Substring(1, $value.Length - 2)
+      }
+      [Environment]::SetEnvironmentVariable($name, $value, "Process")
+    }
+  }
+}
+
 # Verifikasi koneksi database (mendukung Supabase / remote maupun Postgres lokal)
 Write-Host "Memeriksa koneksi database..." -ForegroundColor Cyan
 & $py -c "from app.db import repo; repo.get_pool()"
@@ -13,6 +31,14 @@ if ($LASTEXITCODE -ne 0) {
     throw "Koneksi database gagal. Pastikan DATABASE_URL di .env sudah benar."
 }
 Write-Host "Database terhubung! [OK]" -ForegroundColor Green
+
+# Pastikan schema dasar dan seluruh migration tersedia sebelum worker dimulai.
+Write-Host "Memeriksa dan menerapkan migrasi database..." -ForegroundColor Cyan
+& $py -m scripts.migrate
+if ($LASTEXITCODE -ne 0) {
+    throw "Migrasi database gagal. Worker tidak dijalankan."
+}
+Write-Host "Migrasi database selesai! [OK]" -ForegroundColor Green
 
 $procs = @(
   @{ n = "poller";    c = "& '$py' -m scripts.poll" },
@@ -25,9 +51,12 @@ $procs = @(
 
 $gowa = Join-Path $root "tools\gowa\whatsapp.exe"
 if (Test-Path $gowa) {
+  if (-not $env:WHATSAPP_WEBHOOK_SECRET) {
+    throw "WHATSAPP_WEBHOOK_SECRET wajib diisi untuk mengamankan webhook GOWA."
+  }
   $procs += @{
     n = "whatsapp"
-    c = "& '$gowa' rest --host 127.0.0.1 --port 3000 --webhook 'http://127.0.0.1:8000/webhook/whatsapp' --webhook-events 'message'"
+    c = "& '$gowa' rest --host 127.0.0.1 --port 3000 --webhook 'http://127.0.0.1:8000/webhook/whatsapp/gowa' --webhook-secret '$env:WHATSAPP_WEBHOOK_SECRET' --webhook-events 'message'"
   }
 }
 
