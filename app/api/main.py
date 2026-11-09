@@ -3,8 +3,10 @@ import hmac
 import json
 import logging
 import os
+from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse
 
 from app.channels import telegram, whatsapp
@@ -12,6 +14,38 @@ from app.db import repo
 from app.logging_config import setup_logging
 from app.schemas import ChargingEvent
 from app.services import charging
+
+
+def _enqueue_to_inbox(msg: Any, *, channel_label: str) -> None:
+    """Simpan satu pesan masuk ke Inbox. psycopg bersifat blocking, jadi endpoint async
+    memanggil fungsi ini lewat run_in_threadpool agar event loop tidak tersendat."""
+    try:
+        repo.enqueue_inbox(
+            channel=msg.channel,
+            user_id=msg.user_id,
+            chat_id=msg.chat_id,
+            message_id=msg.message_id,
+            body=msg.text,
+            is_start=msg.is_start,
+            start_payload=msg.start_payload,
+        )
+    except Exception:
+        logger.exception("gagal menyimpan pesan %s ke Inbox", channel_label)
+        raise HTTPException(status_code=503, detail="Inbox sementara tidak tersedia")
+
+
+async def _enqueue_whatsapp_messages(raw: bytes, signature: str | None, *, provider: str | None = None) -> None:
+    secret = whatsapp.webhook_secret(provider) if provider else None
+    if not whatsapp.verify_signature(raw, signature, secret=secret):
+        raise HTTPException(status_code=403)
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400)
+
+    for msg in whatsapp.parse_webhook(payload):
+        await run_in_threadpool(_enqueue_to_inbox, msg, channel_label="WhatsApp")
+
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -53,19 +87,7 @@ async def telegram_webhook(
 
     msg = telegram.parse_update(payload)
     if msg is not None:
-        try:
-            repo.enqueue_inbox(
-                channel=msg.channel,
-                user_id=msg.user_id,
-                chat_id=msg.chat_id,
-                message_id=msg.message_id,
-                body=msg.text,
-                is_start=msg.is_start,
-                start_payload=msg.start_payload,
-            )
-        except Exception:
-            logger.exception("gagal menyimpan pesan Telegram ke Inbox")
-            raise HTTPException(status_code=503, detail="Inbox sementara tidak tersedia")
+        await run_in_threadpool(_enqueue_to_inbox, msg, channel_label="Telegram")
 
     return {"ok": True}
   
@@ -114,26 +136,17 @@ async def whatsapp_webhook(
     x_hub_signature_256: str | None = Header(default=None),
 ) -> dict[str, bool]:
     raw = await request.body()
-    if not whatsapp.verify_signature(raw, x_hub_signature_256):
-        raise HTTPException(status_code=403)
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        raise HTTPException(status_code=400)
+    # Mendukung webhook Meta (WHATSAPP_APP_SECRET) maupun GOWA (WHATSAPP_WEBHOOK_SECRET)
+    await _enqueue_whatsapp_messages(raw, x_hub_signature_256, provider=None)
+    return {"ok": True}
 
-    for msg in whatsapp.parse_webhook(payload):
-        try:
-            repo.enqueue_inbox(
-                channel=msg.channel,
-                user_id=msg.user_id,
-                chat_id=msg.chat_id,
-                message_id=msg.message_id,
-                body=msg.text,
-                is_start=msg.is_start,
-                start_payload=msg.start_payload,
-            )
-        except Exception:
-            logger.exception("gagal menyimpan pesan WhatsApp ke Inbox")
-            raise HTTPException(status_code=503, detail="Inbox sementara tidak tersedia")
 
+@app.post("/webhook/whatsapp/gowa")
+async def gowa_webhook(
+    request: Request,
+    x_hub_signature_256: str | None = Header(default=None),
+) -> dict[str, bool]:
+    """Webhook GOWA; signature diverifikasi dengan secret GOWA khusus."""
+    raw = await request.body()
+    await _enqueue_whatsapp_messages(raw, x_hub_signature_256, provider="gowa")
     return {"ok": True}
