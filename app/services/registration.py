@@ -21,7 +21,7 @@ PROMPTS = {
         "1. Ride-hailing (Taksi online / Ojol)\n"
         "2. Pribadi (Harian / Keluarga)\n"
         "3. Armada (fleet / Bisnis)\n\n"
-        "Cukup balas dengan angka 1, 2, atau 3 ya Kak."
+        "Silahkan pilih nomor 1, 2, dan 3 ya Kak."
     ),
     "ask_area": (
         "Sip, dicatat! 📍\n"
@@ -36,6 +36,16 @@ PROMPTS = {
         "Boleh ya kami kirimkan info promo tarif kWh, voucher diskon, dan reward poin lewat chat ini? 🎁\n"
         "Ketik YA jika setuju, atau TIDAK jika hanya butuh struk transaksi saja."
     ),
+}
+
+BUTTONS: dict[str, list[str]] = {
+    "ask_driver_type": ["1. Ride-hailing", "2. Pribadi", "3. Armada"],
+    "ask_consent": ["YA", "TIDAK"],
+}
+
+BUTTONS_FOR_PROMPT: dict[str, list[str]] = {
+    PROMPTS["ask_driver_type"]: BUTTONS["ask_driver_type"],
+    PROMPTS["ask_consent"]: BUTTONS["ask_consent"],
 }
 
 _DRIVER_TYPES = {
@@ -76,7 +86,15 @@ def handle_answer(state: str, raw: str) -> tuple[str, Answer]:
     if state == "ask_vehicle":
         return next_state, Answer(vehicle_model=_clean(raw, "Tipe kendaraan"))
     if state == "ask_driver_type":
-        driver = _DRIVER_TYPES.get(" ".join(raw.lower().split()))
+        cleaned = " ".join(raw.lower().split())
+        if cleaned.startswith("1"):
+            driver = "ride_hailing"
+        elif cleaned.startswith("2"):
+            driver = "private"
+        elif cleaned.startswith("3"):
+            driver = "fleet"
+        else:
+            driver = _DRIVER_TYPES.get(cleaned)
         if driver is None:
             raise InvalidAnswer("Pilihan tidak dikenali.")
         return next_state, Answer({"driver_type": driver})
@@ -86,8 +104,8 @@ def handle_answer(state: str, raw: str) -> tuple[str, Answer]:
         return next_state, Answer({"main_route": _clean(raw, "Rute", max_len=120)})
 
     answer = " ".join(raw.lower().split())   # ask_consent
-    if answer in _YES:
+    if answer in _YES or answer.startswith("ya") or answer.startswith("yes"):
         return next_state, Answer({"consent_marketing": True})
-    if answer in _NO:
+    if answer in _NO or answer.startswith("tidak") or answer.startswith("no"):
         return next_state, Answer({"consent_marketing": False})
     raise InvalidAnswer("Mohon balas YA atau TIDAK.")

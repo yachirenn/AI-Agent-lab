@@ -245,6 +245,21 @@ def test_plain_stop_withdraws_consent():
     assert repo.get_customer_by_identity("sim", user)["consent_marketing"] is False
 
 
+def test_parse_gowa_poll_vote_normalizes_synthetic_body():
+    gowa_payload = {
+        "event": "message",
+        "payload": {
+            "id": "GOWA-POLL-123",
+            "from": "628987654321@s.whatsapp.net",
+            "body": "Poll vote: YA",
+            "is_from_me": False,
+        },
+    }
+    (message,) = whatsapp.parse_webhook(gowa_payload)
+    assert message.text == "YA"
+    assert message.user_id == "628987654321"
+
+
 def test_parse_gowa_message():
     gowa_payload = {
         "event": "message",
@@ -367,6 +382,31 @@ def test_gowa_send_chat_presence_maps_composing_to_start(monkeypatch):
     assert called["json"]["action"] == "start"
 
 
+def test_gowa_send_interactive_calls_correct_endpoint(monkeypatch):
+    called = {}
+
+    class FakeResponse:
+        status_code = 201
+        text = "ok"
+
+    def fake_post(url, json, headers, auth):
+        called.update(url=url, json=json, headers=headers, auth=auth)
+        return FakeResponse()
+
+    monkeypatch.setattr(whatsapp._client, "post", fake_post)
+    monkeypatch.setenv("WHATSAPP_PROVIDER", "gowa")
+    whatsapp.send_interactive("08123456789", {"type": "button", "body": {"text": "Pilih"}})
+    assert called["url"] == "http://127.0.0.1:3000/send/interactive"
+    assert called["json"] == {"type": "button", "body": {"text": "Pilih"}, "phone": "628123456789"}
+    assert called["headers"]["X-Device-Id"] == "enerva-bot"
+
+
+def test_gowa_send_interactive_rejects_meta_provider(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_PROVIDER", "meta")
+    with pytest.raises(whatsapp.WhatsAppError, match="tidak tersedia"):
+        whatsapp.send_interactive("08123456789", {"type": "button"})
+
+
 def test_meta_send_chat_presence_is_noop(monkeypatch):
     monkeypatch.setenv("WHATSAPP_PROVIDER", "meta")
     called = []
@@ -385,3 +425,124 @@ def test_indicate_typing_swallows_failure_safely(monkeypatch):
     )
     # Tidak boleh melempar exception: agent tetap aman berjalan
     indicate_typing(msg)
+
+
+def test_gowa_send_poll_calls_correct_endpoint(monkeypatch):
+    called = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = "ok"
+
+    def fake_post(url, json, headers, auth):
+        called.update(url=url, json=json, headers=headers)
+        return FakeResponse()
+
+    monkeypatch.setattr(whatsapp._client, "post", fake_post)
+    monkeypatch.setenv("WHATSAPP_PROVIDER", "gowa")
+    monkeypatch.setenv("GOWA_BASE_URL", "http://127.0.0.1:3000")
+
+    whatsapp.send_poll("08123456789", "Pilih tipe kendaraan:", ["1. Ride-hailing", "2. Pribadi", "3. Armada"])
+    assert called["url"] == "http://127.0.0.1:3000/send/poll"
+    assert called["json"]["phone"] == "628123456789"
+    assert called["json"]["question"] == "Pilih tipe kendaraan:"
+    assert called["json"]["options"] == ["1. Ride-hailing", "2. Pribadi", "3. Armada"]
+    assert called["json"]["max_answer"] == 1
+    assert called["headers"]["X-Device-Id"] == "enerva-bot"
+
+
+def test_meta_send_poll_formats_interactive_buttons(monkeypatch):
+    posted = []
+    monkeypatch.setenv("WHATSAPP_PROVIDER", "meta")
+    monkeypatch.setattr(whatsapp, "_post_meta", lambda payload: posted.append(payload))
+
+    whatsapp.send_poll("628123456789", "Pilih:", ["Opsi A", "Opsi B"])
+    assert len(posted) == 1
+    assert posted[0]["type"] == "interactive"
+    assert posted[0]["interactive"]["type"] == "button"
+    buttons = posted[0]["interactive"]["action"]["buttons"]
+    assert len(buttons) == 2
+    assert buttons[0]["reply"]["title"] == "Opsi A"
+
+
+def test_dispatcher_routes_button_prompt_to_send_poll(monkeypatch):
+    from app.services import dispatcher, registration
+    poll_calls = []
+    text_calls = []
+
+    monkeypatch.setattr(whatsapp, "send_poll", lambda to, q, opts: poll_calls.append((to, q, opts)))
+    monkeypatch.setattr(whatsapp, "send_text", lambda to, txt: text_calls.append((to, txt)))
+
+    # Pesan prompt yang punya tombol (ask_driver_type)
+    prompt_with_buttons = registration.PROMPTS["ask_driver_type"]
+    dispatcher.send("whatsapp", "628123456789", prompt_with_buttons)
+    assert len(poll_calls) == 1
+    assert poll_calls[0][0] == "628123456789"
+    assert poll_calls[0][1] == prompt_with_buttons
+    assert "2. Pribadi" in poll_calls[0][2]
+
+    # Pesan biasa tanpa tombol
+    dispatcher.send("whatsapp", "628123456789", "Pesan informasi biasa")
+    assert len(text_calls) == 1
+    assert text_calls[0][1] == "Pesan informasi biasa"
+
+
+def test_registration_handle_answer_accepts_poll_and_button_clicks():
+    from app.services import registration
+
+    # Driver type: klik tombol "1. Ride-hailing", "2. Pribadi", atau "Armada"
+    s1, a1 = registration.handle_answer("ask_driver_type", "1. Ride-hailing")
+    assert a1.fields["driver_type"] == "ride_hailing"
+
+    s2, a2 = registration.handle_answer("ask_driver_type", "2. Pribadi")
+    assert a2.fields["driver_type"] == "private"
+
+    s3, a3 = registration.handle_answer("ask_driver_type", "3. Armada")
+    assert a3.fields["driver_type"] == "fleet"
+
+    # Consent: klik "YA, Setuju" atau "TIDAK"
+    sc1, ac1 = registration.handle_answer("ask_consent", "YA, Setuju")
+    assert ac1.fields["consent_marketing"] is True
+
+    sc2, ac2 = registration.handle_answer("ask_consent", "TIDAK, Nanti Saja")
+    assert ac2.fields["consent_marketing"] is False
+
+
+def test_send_poll_empty_options_calls_send_text(monkeypatch):
+    sent_text = []
+    monkeypatch.setattr(whatsapp, "send_text", lambda to, txt: sent_text.append((to, txt)))
+    whatsapp.send_poll("628123456789", "Pertanyaan tanpa opsi", [])
+    assert len(sent_text) == 1
+    assert sent_text[0] == ("628123456789", "Pertanyaan tanpa opsi")
+
+
+def test_send_poll_gowa_error_falls_back_to_send_text(monkeypatch):
+    sent_text = []
+
+    class FakeErrorResponse:
+        status_code = 500
+        text = "Internal Server Error"
+
+    monkeypatch.setattr(whatsapp._client, "post", lambda *a, **k: FakeErrorResponse())
+    monkeypatch.setattr(whatsapp, "send_text", lambda to, txt: sent_text.append((to, txt)))
+    monkeypatch.setenv("WHATSAPP_PROVIDER", "gowa")
+
+    # Saat GOWA error 500, send_poll tidak crash tapi fallback mulus ke send_text
+    whatsapp.send_poll("628123456789", "Pertanyaan polling", ["A", "B"])
+    assert len(sent_text) == 1
+    assert sent_text[0] == ("628123456789", "Pertanyaan polling")
+
+
+def test_send_interactive_rejects_non_dict_payload(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_PROVIDER", "gowa")
+    with pytest.raises(TypeError, match="harus berupa object"):
+        whatsapp.send_interactive("628123456789", "bukan-dict")  # type: ignore
+
+
+def test_buttons_for_prompt_keys_match_registration_prompts():
+    from app.services import registration
+    assert registration.PROMPTS["ask_driver_type"] in registration.BUTTONS_FOR_PROMPT
+    assert registration.PROMPTS["ask_consent"] in registration.BUTTONS_FOR_PROMPT
+    assert len(registration.BUTTONS_FOR_PROMPT[registration.PROMPTS["ask_driver_type"]]) == 3
+    assert len(registration.BUTTONS_FOR_PROMPT[registration.PROMPTS["ask_consent"]]) == 2
+

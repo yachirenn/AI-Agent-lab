@@ -23,7 +23,12 @@ def send(channel: str, recipient: str, text: str) -> None:
         if channel == "telegram":
             telegram.send_message(recipient, text)
         elif channel == "whatsapp":
-            whatsapp.send_text(recipient, text)
+            from app.services import registration
+            options = registration.BUTTONS_FOR_PROMPT.get(text)
+            if options:
+                whatsapp.send_poll(recipient, text, options)
+            else:
+                whatsapp.send_text(recipient, text)
         else:
             raise DeliveryError(f"channel tidak didukung: {channel}", permanent=True)
     except telegram.TelegramError as exc:

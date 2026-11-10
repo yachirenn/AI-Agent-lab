@@ -96,6 +96,11 @@ def parse_webhook(payload: Any) -> list[InboundMessage]:
         body = str(p.get("body") or p.get("text") or "").strip()
         mid = str(p.get("id") or "")
 
+        # GOWA poll selections arrive as synthetic text (e.g. "Poll vote: YA").
+        # Normalize them before registration/agent routing sees the message.
+        if body.lower().startswith("poll vote:"):
+            body = body.split(":", 1)[1].strip()
+
         if not body or not clean_sender or not mid:
             return []
 
@@ -240,6 +245,115 @@ def send_text(to: str, text: str) -> None:
 
     if resp.status_code not in (200, 201):
         raise WhatsAppError(f"GOWA HTTP {resp.status_code}: {resp.text}", permanent=_is_permanent(resp.status_code))
+
+
+def send_interactive(to: str, payload: dict[str, Any]) -> None:
+    """Kirim payload interactive melalui endpoint GOWA.
+
+    `payload` mengikuti schema interactive dari versi binary GOWA yang sedang
+    digunakan. Adapter ini hanya menambahkan nomor tujuan dan header transport;
+    caller bertanggung jawab membentuk isi interactive yang didukung binary.
+    """
+    if os.environ.get("WHATSAPP_PROVIDER", "gowa").lower() == "meta":
+        raise WhatsAppError("interactive GOWA tidak tersedia untuk provider Meta", permanent=True)
+    if not isinstance(payload, dict):
+        raise TypeError("payload interactive harus berupa object")
+
+    gowa_url = os.environ.get("GOWA_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
+    clean_to = to.split("@")[0].strip()
+    if clean_to.startswith("08"):
+        clean_to = "628" + clean_to[2:]
+    elif clean_to.startswith("+"):
+        clean_to = clean_to[1:]
+
+    body = dict(payload)
+    body["phone"] = clean_to
+    headers = {"Content-Type": "application/json"}
+    device_id = os.environ.get("GOWA_DEVICE_ID", "enerva-bot")
+    if device_id:
+        headers["X-Device-Id"] = device_id
+    basic_user = os.environ.get("GOWA_BASIC_AUTH_USER")
+    basic_pass = os.environ.get("GOWA_BASIC_AUTH_PASS")
+    auth = (basic_user, basic_pass) if basic_user and basic_pass else None
+
+    try:
+        resp = _client.post(
+            f"{gowa_url}/send/interactive",
+            json=body,
+            headers=headers,
+            auth=auth,
+        )
+    except httpx.HTTPError as exc:
+        raise WhatsAppError(f"koneksi ke GOWA gagal: {type(exc).__name__}") from None
+    if resp.status_code not in (200, 201):
+        raise WhatsAppError(
+            f"GOWA interactive HTTP {resp.status_code}: {resp.text}",
+            permanent=_is_permanent(resp.status_code),
+        )
+
+
+def send_poll(to: str, question: str, options: list[str]) -> None:
+    """Kirim polling pilihan via GOWA (/send/poll) atau tombol interaktif via Meta Cloud API."""
+    if not options:
+        send_text(to, question)
+        return
+
+    provider = os.environ.get("WHATSAPP_PROVIDER", "gowa").lower()
+    if provider == "meta":
+        meta_buttons = [
+            {
+                "type": "reply",
+                "reply": {"id": f"btn_{i+1}", "title": str(opt)[:20]},
+            }
+            for i, opt in enumerate(options[:3])
+        ]
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": question},
+                "action": {"buttons": meta_buttons},
+            },
+        }
+        _post_meta(payload)
+        return
+
+    # Kirim via GOWA (go-whatsapp-web-multidevice): POST /send/poll
+    gowa_url = os.environ.get("GOWA_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
+    clean_to = to.split("@")[0].strip()
+    if clean_to.startswith("08"):
+        clean_to = "628" + clean_to[2:]
+    elif clean_to.startswith("+"):
+        clean_to = clean_to[1:]
+
+    payload = {
+        "phone": clean_to,
+        "question": question[:255],
+        "options": [str(opt)[:100] for opt in options[:12]],
+        "max_answer": 1,
+    }
+    headers = {"Content-Type": "application/json"}
+    device_id = os.environ.get("GOWA_DEVICE_ID", "enerva-bot")
+    if device_id:
+        headers["X-Device-Id"] = device_id
+
+    basic_user = os.environ.get("GOWA_BASIC_AUTH_USER")
+    basic_pass = os.environ.get("GOWA_BASIC_AUTH_PASS")
+    auth = (basic_user, basic_pass) if basic_user and basic_pass else None
+
+    try:
+        resp = _client.post(f"{gowa_url}/send/poll", json=payload, headers=headers, auth=auth)
+    except httpx.HTTPError as exc:
+        raise WhatsAppError(f"koneksi ke GOWA gagal: {type(exc).__name__}") from None
+
+    if resp.status_code not in (200, 201):
+        # Fallback mulus ke teks biasa jika endpoint poll gagal di versi GOWA tertentu
+        send_text(to, question)
+
+
 
 
 def send_template(to: str, name: str, params: list[str], language: str = "id") -> None:
