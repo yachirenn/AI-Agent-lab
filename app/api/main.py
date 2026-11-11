@@ -3,9 +3,10 @@ import hmac
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse
 
@@ -14,6 +15,29 @@ from app.db import repo
 from app.logging_config import setup_logging
 from app.schemas import ChargingEvent
 from app.services import charging
+
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
+READINESS_REQUIRED_TABLES = (
+    "customers",
+    "stations",
+    "customer_identities",
+    "charging_sessions",
+    "points_ledger",
+    "conversations",
+    "cs_tickets",
+    "outbox",
+    "inbox",
+    "schema_migrations",
+)
+READINESS_MAX_INBOX_BACKLOG = int(os.environ.get("READINESS_MAX_INBOX_BACKLOG", "1000"))
+READINESS_MAX_OUTBOX_BACKLOG = int(os.environ.get("READINESS_MAX_OUTBOX_BACKLOG", "1000"))
+
+
+def _get_latest_migration_name() -> str | None:
+    if not MIGRATIONS_DIR.exists():
+        return None
+    sql_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    return sql_files[-1].name if sql_files else None
 
 
 def _enqueue_to_inbox(msg: Any, *, channel_label: str) -> None:
@@ -110,12 +134,35 @@ def cms_webhook(event: ChargingEvent) -> dict:
 
 
 @app.get("/health/ready")
-def ready() -> dict[str, bool]:
+def ready(response: Response) -> dict[str, Any]:
+    expected_migration = (
+        os.environ.get("EXPECTED_MIGRATION_VERSION") or _get_latest_migration_name()
+    )
     try:
-        repo.ping()
-    except Exception:
-        raise HTTPException(status_code=503)
-    return {"ok": True}
+        report = repo.readiness_snapshot(
+            expected_migration=expected_migration,
+            required_tables=READINESS_REQUIRED_TABLES,
+            max_inbox_backlog=READINESS_MAX_INBOX_BACKLOG,
+            max_outbox_backlog=READINESS_MAX_OUTBOX_BACKLOG,
+        )
+    except Exception as exc:
+        logger.exception("Readiness probe gagal: database tidak dapat diakses")
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {
+            "ok": False,
+            "checks": {
+                "database": {"ok": False, "error": str(exc)},
+                "tables": {"ok": False, "missing": list(READINESS_REQUIRED_TABLES)},
+                "migrations": {"ok": False, "expected": expected_migration, "applied": None},
+                "inbox": {"ok": False, "total": None, "limit": READINESS_MAX_INBOX_BACKLOG},
+                "outbox": {"ok": False, "active": None, "limit": READINESS_MAX_OUTBOX_BACKLOG},
+            },
+        }
+
+    if not report["ok"]:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return report
 
 
 @app.get("/webhook/whatsapp")

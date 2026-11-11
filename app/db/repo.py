@@ -171,6 +171,29 @@ def dead_outbox(limit: int = 50) -> list[dict[str, Any]]:
         ).fetchall()
 
 
+def inbox_stats() -> list[dict[str, Any]]:
+    """Statistik antrean Inbox terkelola: status, channel, jumlah, dan umur pesan terlama."""
+    with tx() as conn:
+        return conn.execute(
+            """
+            SELECT status, channel, count(*)::int AS n,
+                   COALESCE(max(extract(epoch FROM now() - created_at))
+                            FILTER (WHERE status IN ('pending', 'processing')), 0)::int AS oldest_s
+            FROM inbox GROUP BY 1, 2 ORDER BY 1, 2
+            """
+        ).fetchall()
+
+
+def dead_inbox(limit: int = 50) -> list[dict[str, Any]]:
+    """Pesan masuk yang gagal diproses permanen (dead letter). Tanpa isi body untuk privasi."""
+    with tx() as conn:
+        return conn.execute(
+            "SELECT id, channel, user_id, message_id, attempts, last_error, created_at FROM inbox "
+            "WHERE status = 'dead' ORDER BY id DESC LIMIT %s",
+            (limit,),
+        ).fetchall()
+
+
 def count_inbound(customer_id: Any) -> int:
     with tx() as conn:
         return conn.execute(
@@ -182,6 +205,105 @@ def count_inbound(customer_id: Any) -> int:
 def ping() -> None:
     with tx() as conn:
         conn.execute("SELECT 1")
+
+
+def readiness_snapshot(
+    *,
+    expected_migration: str | None,
+    required_tables: tuple[str, ...],
+    max_inbox_backlog: int,
+    max_outbox_backlog: int,
+) -> dict[str, Any]:
+    """Return non-sensitive dependency checks used by the readiness endpoint."""
+    with tx() as conn:
+        conn.execute("SELECT 1")
+
+        tables_in_db = {
+            r["tablename"]
+            for r in conn.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+            ).fetchall()
+        }
+        missing_tables = [table for table in required_tables if table not in tables_in_db]
+        tables_ok = not missing_tables
+
+        migration_check: dict[str, Any] = {
+            "ok": False,
+            "expected": expected_migration,
+            "applied": None,
+        }
+        if "schema_migrations" not in missing_tables:
+            applied_rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
+            applied_versions = {r["version"] for r in applied_rows}
+            numbered = [v for v in applied_versions if v != "schema.sql"]
+            latest_applied = sorted(numbered)[-1] if numbered else ("schema.sql" if "schema.sql" in applied_versions else None)
+            migration_check["applied"] = latest_applied
+            migration_check["ok"] = bool(
+                expected_migration is None or expected_migration in applied_versions
+            )
+
+        inbox_check: dict[str, Any] = {
+            "ok": False,
+            "pending": None,
+            "processing": None,
+            "total": None,
+            "limit": max_inbox_backlog,
+        }
+        outbox_check: dict[str, Any] = {
+            "ok": False,
+            "pending": None,
+            "sending": None,
+            "dead": None,
+            "active": None,
+            "total": None,
+            "limit": max_outbox_backlog,
+        }
+        if "inbox" not in missing_tables:
+            inbox = conn.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE status = 'pending')::int AS pending,
+                    count(*) FILTER (WHERE status = 'processing')::int AS processing,
+                    count(*)::int AS total
+                FROM inbox
+                """
+            ).fetchone()
+            inbox_check.update(
+                ok=inbox["total"] <= max_inbox_backlog,
+                pending=inbox["pending"],
+                processing=inbox["processing"],
+                total=inbox["total"],
+            )
+        if "outbox" not in missing_tables:
+            outbox = conn.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE status = 'pending')::int AS pending,
+                    count(*) FILTER (WHERE status = 'sending')::int AS sending,
+                    count(*) FILTER (WHERE status = 'dead')::int AS dead,
+                    count(*) FILTER (WHERE status IN ('pending', 'sending'))::int AS active,
+                    count(*)::int AS total
+                FROM outbox
+                """
+            ).fetchone()
+            outbox_check.update(
+                ok=outbox["active"] <= max_outbox_backlog,
+                pending=outbox["pending"],
+                sending=outbox["sending"],
+                dead=outbox["dead"],
+                active=outbox["active"],
+                total=outbox["total"],
+            )
+
+        checks = {
+            "database": {"ok": True},
+            "tables": {"ok": tables_ok, "missing": missing_tables},
+            "migrations": migration_check,
+            "inbox": inbox_check,
+            "outbox": outbox_check,
+        }
+        return {"ok": all(check["ok"] for check in checks.values()), "checks": checks}
+
 
 def get_pool() -> ConnectionPool:
     global _pool

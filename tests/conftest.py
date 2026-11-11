@@ -54,10 +54,31 @@ else:
 os.environ["PREFERENCES_LEARNING"] = "off"
 os.environ["PREFERENCE_LEARNING"] = "off"
 
+from pathlib import Path
 from app.db import repo  # noqa: E402
 
-KEEP = {"stations"}  # data seed yang dibutuhkan tes, tidak ikut dihapus
+KEEP = {"stations", "schema_migrations"}  # data seed dan versi migrasi tidak ikut dihapus
 _db_available: bool | None = None
+
+
+def _seed_schema_migrations_if_needed(conn) -> None:
+    tables = {
+        r["tablename"]
+        for r in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+        ).fetchall()
+    }
+    if "schema_migrations" in tables and "inbox" in tables:
+        count_row = conn.execute("SELECT count(*)::int AS n FROM schema_migrations").fetchone()
+        count = count_row["n"] if isinstance(count_row, dict) else count_row[0]
+        if count == 0:
+            migrations_dir = Path(__file__).resolve().parent.parent / "app" / "db" / "migrations"
+            conn.execute("INSERT INTO schema_migrations (version) VALUES ('schema.sql') ON CONFLICT DO NOTHING")
+            for f in sorted(migrations_dir.glob("*.sql")):
+                conn.execute(
+                    "INSERT INTO schema_migrations (version) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (f.name,),
+                )
 
 
 def is_db_available() -> bool:
@@ -101,6 +122,7 @@ def _truncate_all() -> None:
                     sql.SQL(", ").join(sql.Identifier(n) for n in names)
                 )
             )
+        _seed_schema_migrations_if_needed(conn)
 
 
 @pytest.fixture(autouse=True)
