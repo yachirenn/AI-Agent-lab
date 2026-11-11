@@ -38,14 +38,8 @@ def _tokens(text: str) -> set[str]:
 def search(query: str, top: int = 3, min_similarity: float = 0.45) -> list[str]:
     """Pencarian RAG semantik (Semantic Vector Search) dengan fallback leksikal & static.
     Mengembalikan daftar teks jawaban yang siap dibaca oleh LLM."""
-    detailed = search_detailed(query, top=top, min_similarity=min_similarity)
-    if detailed:
-        return [f"[{d['title']}] {d['content']}" for d in detailed]
-
-    # Fallback ke static jika database kosong atau tidak ada hasil sama sekali
-    q = _tokens(query)
-    scored = sorted(((len(q & _tokens(k)), a) for k, a in _STATIC_FALLBACK), reverse=True)
-    return [a for score, a in scored[:top] if score > 0]
+    meta = search_with_metadata(query, top=top, min_similarity=min_similarity)
+    return meta["answers"]
 
 
 def search_detailed(
@@ -53,8 +47,9 @@ def search_detailed(
     top: int = 3,
     min_similarity: float = 0.45,
     category: str | None = None,
+    include_fallback: bool = False,
 ) -> list[dict[str, Any]]:
-    """Pencarian RAG mendalam yang mengembalikan metadata lengkap dan skor kemiripan."""
+    """Pencarian RAG mendalam yang mengembalikan metadata lengkap, skor kemiripan, dan sumber."""
     clean_q = " ".join(query.strip().split())
     if not clean_q or len(clean_q) < 2:
         return []
@@ -85,7 +80,15 @@ def search_detailed(
                 lexical_bonus = 0.08 if (q_tokens & title_tokens) else 0.0
                 total_score = sim + lexical_bonus
                 if total_score >= min_similarity:
-                    scored.append((total_score, {**item, "similarity": round(sim, 4), "score": round(total_score, 4)}))
+                    scored.append((
+                        total_score,
+                        {
+                            **item,
+                            "similarity": round(sim, 4),
+                            "score": round(total_score, 4),
+                            "source": "semantic",
+                        },
+                    ))
 
             scored.sort(key=lambda x: x[0], reverse=True)
             if scored:
@@ -95,11 +98,84 @@ def search_detailed(
     lexical_items = repo.search_knowledge_lexical(clean_q, limit=top)
     if lexical_items:
         return [
-            {**it, "similarity": round(float(it.get("rank", 0.1)), 4), "score": round(float(it.get("rank", 0.1)), 4)}
+            {
+                **it,
+                "similarity": round(float(it.get("rank", 0.1)), 4),
+                "score": round(float(it.get("rank", 0.1)), 4),
+                "source": "lexical",
+            }
             for it in lexical_items
         ]
 
+    # 3. Fallback Statis Lokal jika diizinkan dan kedua metode di atas tidak menghasilkan
+    if include_fallback:
+        q = _tokens(clean_q)
+        scored_static = sorted(
+            ((len(q & _tokens(k)), a) for k, a in _STATIC_FALLBACK),
+            reverse=True,
+        )
+        fallback_items = [
+            {
+                "slug": "static-fallback",
+                "title": "Data Standar Operasional Enerva",
+                "category": "general",
+                "content": a,
+                "similarity": 0.0,
+                "score": round(score / 5.0, 4),
+                "source": "static_fallback",
+            }
+            for score, a in scored_static[:top]
+            if score > 0
+        ]
+        if fallback_items:
+            return fallback_items
+
     return []
+
+
+def search_with_metadata(
+    query: str,
+    top: int = 3,
+    min_similarity: float = 0.45,
+    category: str | None = None,
+) -> dict[str, Any]:
+    """Pencarian RAG lengkap dengan penanda status degradasi pencarian:
+    - mode: 'semantic' | 'lexical' | 'static_fallback' | 'empty'
+    - degraded: bool (True jika berada dalam fallback lexical atau static)
+    - answers: list[str] (teks balasan yang siap dikonsumsi LLM)
+    - results: list[dict[str, Any]] (daftar artikel beserta skor dan sumbernya)
+    """
+    clean_q = " ".join(query.strip().split())
+    if not clean_q or len(clean_q) < 2:
+        return {"mode": "empty", "degraded": True, "answers": [], "results": []}
+
+    results = search_detailed(
+        clean_q,
+        top=top,
+        min_similarity=min_similarity,
+        category=category,
+        include_fallback=True,
+    )
+    if not results:
+        return {"mode": "empty", "degraded": True, "answers": [], "results": []}
+
+    first_source = results[0].get("source", "semantic")
+    mode = first_source
+    degraded = mode in ("lexical", "static_fallback")
+
+    answers = []
+    for r in results:
+        if r.get("source") == "static_fallback":
+            answers.append(r["content"])
+        else:
+            answers.append(f"[{r.get('title', 'Info')}] {r.get('content', '')}")
+
+    return {
+        "mode": mode,
+        "degraded": degraded,
+        "answers": answers,
+        "results": results,
+    }
 
 
 def upsert_document(
