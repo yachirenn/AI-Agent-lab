@@ -32,7 +32,10 @@ def _database_name_from_url(url: str) -> str:
 
 
 def _assert_test_database(conn) -> None:
-    database = conn.execute("SELECT current_database()").fetchone()[0]
+    row = conn.execute("SELECT current_database()").fetchone()
+    # repo connections use dict_row, while this direct psycopg connection
+    # may use the default tuple row factory.
+    database = row["current_database"] if isinstance(row, dict) else row[0]
     if not database.endswith("_test"):
         raise RuntimeError(f"SAFETY VIOLATION: terhubung ke database non-test '{database}'")
 
