@@ -60,6 +60,20 @@ def load_overview(days: int):
 
 require_login()
 st.title("⚡ Enerva Customer Intelligence")
+
+# Notifikasi Instan Dead-Letter
+dead_out = repo.dead_outbox()
+dead_in = repo.dead_inbox()
+if dead_out or dead_in:
+    dead_alert_items = []
+    if dead_in:
+        dead_alert_items.append(f"**{len(dead_in)} pesan Inbox**")
+    if dead_out:
+        dead_alert_items.append(f"**{len(dead_out)} pesan Outbox**")
+    detail_str = " dan ".join(dead_alert_items)
+    urgent_warning = " ⚠️ **Termasuk ALERT STAF yang gagal!**" if any(d.get("kind") == "staff_alert" for d in dead_out) else ""
+    st.error(f"🚨 **ALERT DEAD-LETTER:** Ditemukan {detail_str} gagal diproses permanen.{urgent_warning} Periksa panel Observability Worker di bawah.")
+
 tab_overview, tab_customers, tab_inactive, tab_tickets, tab_kb, tab_approvals = st.tabs(
     ["Ringkasan", "Customer 360°", "Inaktivitas", "Antrean CS", "Knowledge Base (RAG)", "Persetujuan Balasan"]
 )
@@ -282,16 +296,31 @@ with tab_kb:
     st.subheader("📚 Knowledge Base & Semantic Search (RAG)")
     test_q = st.text_input("Uji Pencarian Pertanyaan Customer", placeholder="Contoh: bisa bayar pakai qris?")
     if test_q:
-        results = knowledge.search_detailed(test_q, top=3)
+        rag = knowledge.search_with_metadata(test_q, top=3)
+        mode = rag["mode"]
+        degraded = rag["degraded"]
+        results = rag["results"]
+
+        # Indikator status degradasi RAG
+        if mode == "semantic":
+            st.success("🟢 **Status RAG: Semantic Vector Search (Optimal)** — Jawaban ditemukan via cosine similarity embedding 768 dimensi.")
+        elif mode == "lexical":
+            st.warning("🟡 **Status RAG: Lexical Fallback (Degradasi Ringan)** — Kemiripan semantik rendah atau embedding belum diindeks. Jawaban bersumber dari pencarian teks PostgreSQL.")
+        elif mode == "static_fallback":
+            st.error("🟠 **Status RAG: Static Fallback (Degradasi Darurat)** — Tidak ada artikel di database yang cocok. Menggunakan data SOP statis lokal.")
+        else:
+            st.info("⚪ **Status RAG: Tidak Ditemukan** — Tidak ada jawaban yang cocok dengan pertanyaan ini.")
+
         if results:
-            st.write(f"Ditemukan **{len(results)} artikel** paling relevan:")
+            st.write(f"Ditemukan **{len(results)} artikel** (Mode: `{mode.upper()}` | Status Degradasi: `{'Degraded' if degraded else 'Optimal'}`):")
             for r in results:
                 score = r.get("score", 0.0)
                 sim = r.get("similarity", 0.0)
+                src = r.get("source", mode).upper()
                 cat = r.get("category", "general").upper()
-                with st.expander(f"[{cat}] {r['title']} — Skor Relevansi: {score:.2f} (Kemiripan Vektor: {sim:.2f})", expanded=True):
+                with st.expander(f"[{src}] [{cat}] {r['title']} — Skor: {score:.2f} (Kemiripan Vektor: {sim:.2f})", expanded=True):
                     st.write(r["content"])
-                    st.caption(f"Slug: `{r.get('slug')}` | Kategori: `{r.get('category')}`")
+                    st.caption(f"Slug: `{r.get('slug')}` | Kategori: `{r.get('category')}` | Sumber: `{src}`")
         else:
             st.warning("Tidak ada artikel yang cocok dengan ambang batas kemiripan.")
 
@@ -303,15 +332,53 @@ with tab_kb:
         st.dataframe(df_kb, use_container_width=True, hide_index=True)
     else:
         st.info("Belum ada artikel dalam kategori ini.")
-        
-with st.expander("Sistem: antrean pengiriman"):
-    stats = repo.outbox_stats()
-    if stats:
-        st.dataframe(pd.DataFrame(stats), use_container_width=True, hide_index=True)
-    else:
-        st.caption("Outbox kosong.")
-    dead = repo.dead_outbox()
-    if any(d["kind"] == "staff_alert" for d in dead):
-        st.error("Ada ALERT STAF yang gagal terkirim permanen. Hubungi staf lewat jalur lain.")
-    if dead:
-        st.dataframe(pd.DataFrame(dead), use_container_width=True, hide_index=True)
+
+with st.expander("🛠️ Observability Worker: Antrean Inbox & Outbox", expanded=bool(dead_in or dead_out)):
+    st.subheader("Monitoring Antrean & Pekerja Latar Belakang")
+
+    in_stats = repo.inbox_stats()
+    out_stats = repo.outbox_stats()
+
+    in_pending = sum(r["n"] for r in in_stats if r["status"] == "pending")
+    in_processing = sum(r["n"] for r in in_stats if r["status"] == "processing")
+    out_pending = sum(r["n"] for r in out_stats if r["status"] == "pending")
+    out_sending = sum(r["n"] for r in out_stats if r["status"] == "sending")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Inbox Antre (Pending)", in_pending, delta=f"{in_processing} processing" if in_processing else None)
+    m2.metric(
+        "Inbox Dead-Letter",
+        len(dead_in),
+        delta=f"{len(dead_in)} gagal" if dead_in else "Normal",
+        delta_color="inverse" if dead_in else "normal",
+    )
+    m3.metric("Outbox Antre (Pending)", out_pending, delta=f"{out_sending} sending" if out_sending else None)
+    m4.metric(
+        "Outbox Dead-Letter",
+        len(dead_out),
+        delta=f"{len(dead_out)} gagal" if dead_out else "Normal",
+        delta_color="inverse" if dead_out else "normal",
+    )
+
+    col_inbox, col_outbox = st.columns(2)
+    with col_inbox:
+        st.markdown("#### 📥 Antrean Pesan Masuk (Inbox)")
+        if in_stats:
+            st.dataframe(pd.DataFrame(in_stats), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Inbox bersih (tidak ada antrean aktif).")
+
+        if dead_in:
+            st.error(f"Ditemukan {len(dead_in)} pesan Inbox dead:")
+            st.dataframe(pd.DataFrame(dead_in), use_container_width=True, hide_index=True)
+
+    with col_outbox:
+        st.markdown("#### 📤 Antrean Pesan Keluar (Outbox)")
+        if out_stats:
+            st.dataframe(pd.DataFrame(out_stats), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Outbox bersih (tidak ada antrean aktif).")
+
+        if dead_out:
+            st.error(f"Ditemukan {len(dead_out)} pesan Outbox dead:")
+            st.dataframe(pd.DataFrame(dead_out), use_container_width=True, hide_index=True)

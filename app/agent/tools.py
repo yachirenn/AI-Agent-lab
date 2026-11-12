@@ -67,7 +67,12 @@ def _recent_sessions(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _search_faq(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    return {"answers": faq.search(str(args.get("query", ""))[:200])}
+    rag = faq.search_with_metadata(str(args.get("query", ""))[:200])
+    return {
+        "answers": rag["answers"],
+        "mode": rag["mode"],
+        "degraded": rag["degraded"],
+    }
 
 
 

@@ -132,7 +132,7 @@ ai-agent-lab/
 │   │   ├── telegram.py        # Telegram Bot API adapter
 │   │   └── whatsapp.py        # Meta WhatsApp Cloud API adapter
 │   ├── db/                    # Data Layer & Database Repository
-│   │   ├── migrations/        # SQL Migrations (002 s/d 013)
+│   │   ├── migrations/        # SQL Migrations (002 s/d 015)
 │   │   ├── repo.py            # Single Source of Truth akses PostgreSQL
 │   │   └── schema.sql         # Skema inisial database
 │   ├── services/              # Logika Bisnis & Servis Operasional
@@ -241,20 +241,25 @@ Jika menggunakan Docker:
 docker compose up -d
 ```
 
-Jalankan migration runner dari root project. Runner akan memasang `schema.sql` pada database kosong, menerapkan migration bernomor sampai 014, dan aman dijalankan ulang:
+Jalankan migration runner dari root project. Runner akan memasang `schema.sql` pada database kosong, menerapkan migration bernomor sampai 015, dan aman dijalankan ulang:
 
 ```powershell
 python -m scripts.migrate
 ```
 
-Untuk membuat database test lokal, pastikan database bernama `enerva_test` tersedia, lalu gunakan URL test eksplisit:
+Untuk membuat database test lokal, gunakan helper otomatis berikut. Nama database test wajib berakhiran `_test` dan contoh ini memakai PostgreSQL lokal pada port 5433:
 
 ```powershell
 # Sesuaikan user/password dengan instalasi PostgreSQL lokal.
-createdb enerva_test
-$env:TEST_DATABASE_URL = "postgresql://enerva:password@localhost:5432/enerva_test"
+python -m scripts.setup_test_db --user postgres --password password_postgres --port 5433
+```
+
+Helper tersebut membuat `enerva_test` jika belum tersedia, menerapkan `schema.sql` dan migration sampai 015, lalu menambahkan `TEST_DATABASE_URL` ke `.env`. Alternatif manual:
+
+```powershell
+createdb -p 5433 enerva_test
+$env:TEST_DATABASE_URL = "postgresql://postgres:password_postgres@localhost:5433/enerva_test"
 python -m scripts.migrate
-pytest
 ```
 
 `pytest` wajib menerima variabel lingkungan `TEST_DATABASE_URL` eksplisit, menolak URL yang tidak berakhiran `_test`, dan melakukan verifikasi `current_database()` sebelum mengizinkan pembersihan data destruktif (`TRUNCATE ... CASCADE`).
@@ -321,10 +326,11 @@ mcp dev scripts/mcp_server.py
 ## 🧪 Pengujian & Evaluasi
 
 ### Menjalankan Automated Test Suite (Pytest)
-Proyek ini dilengkapi **140 skenario pengujian otomatis** yang mencakup pengujian konkurensi, idempotensi, race conditions, formula finansial, RAG search, live handover, multi-station, dan MCP server:
+Proyek ini dilengkapi **216 skenario pengujian otomatis** yang mencakup pengujian konkurensi, idempotensi, race conditions, formula finansial, RAG search, live handover, multi-station, WhatsApp Poll, dan MCP server:
 ```powershell
-pytest
+.venv/Scripts/python -m pytest -q
 ```
+*(Seluruh 216 test lolos 100% pada database test lokal `enerva_test`).*
 
 ### Menjalankan Evaluasi Perilaku AI Agent (Evals)
 Menjalankan 26 kasus uji evaluasi perilaku agent (uji prompt injection, batasan data, empati persona, dan penilaian otomatis *LLM-as-a-Judge*):

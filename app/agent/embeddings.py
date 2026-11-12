@@ -91,10 +91,12 @@ class MockEmbedder:
         clean = " ".join(text.lower().split())
         if not clean:
             return [0.0] * self.dimension
-        # Buat seed dari MD5 hash text agar deterministik
-        h = int(hashlib.md5(clean.encode("utf-8")).hexdigest(), 16)
-        rng = np.random.default_rng(h % (2**32))
-        vec = rng.normal(0, 1, self.dimension)
+        words = clean.split()
+        vec = np.zeros(self.dimension, dtype=np.float64)
+        for w in words:
+            h = int(hashlib.md5(w.encode("utf-8")).hexdigest(), 16)
+            rng = np.random.default_rng(h % (2**32))
+            vec += rng.normal(0, 1, self.dimension)
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec = vec / norm
