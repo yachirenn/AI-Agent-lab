@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.channels import telegram, whatsapp
 from app.db import repo
@@ -85,7 +85,91 @@ async def lifespan(app: FastAPI):
     repo.close_pool()
 
 
+DEFAULT_MAX_TELEGRAM_PAYLOAD_BYTES = 256 * 1024       # 256 KB
+DEFAULT_MAX_WHATSAPP_PAYLOAD_BYTES = 1024 * 1024      # 1 MB
+DEFAULT_MAX_CMS_PAYLOAD_BYTES = 1024 * 1024           # 1 MB
+
+
+def get_webhook_payload_limits() -> dict[str, int]:
+    return {
+        "/webhook/telegram": int(os.environ.get("MAX_TELEGRAM_PAYLOAD_BYTES", str(DEFAULT_MAX_TELEGRAM_PAYLOAD_BYTES))),
+        "/webhook/whatsapp": int(os.environ.get("MAX_WHATSAPP_PAYLOAD_BYTES", str(DEFAULT_MAX_WHATSAPP_PAYLOAD_BYTES))),
+        "/webhook/whatsapp/gowa": int(os.environ.get("MAX_WHATSAPP_PAYLOAD_BYTES", str(DEFAULT_MAX_WHATSAPP_PAYLOAD_BYTES))),
+        "/webhook/cms": int(os.environ.get("MAX_CMS_PAYLOAD_BYTES", str(DEFAULT_MAX_CMS_PAYLOAD_BYTES))),
+    }
+
+
+class PayloadTooLargeError(HTTPException):
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Ukuran payload melebihi batas maksimal {limit} bytes",
+        )
+
+
+class WebhookPayloadLimitMiddleware:
+    """Melindungi endpoint webhook dari request berukuran raksasa (DoS attack).
+
+    Mengecek header Content-Length sebelum membaca body, serta menghitung
+    byte aliran streaming jika request menggunakan chunked transfer encoding.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        limits = get_webhook_payload_limits()
+        limit = limits.get(path)
+        if limit is None:
+            await self.app(scope, receive, send)
+            return
+
+        # 1. Fast check: Content-Length header jika tersedia
+        headers = dict(scope.get("headers", []))
+        content_length_raw = headers.get(b"content-length")
+        if content_length_raw:
+            try:
+                content_length = int(content_length_raw)
+                if content_length > limit:
+                    response = JSONResponse(
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        content={"detail": f"Ukuran payload melebihi batas maksimal {limit} bytes"},
+                    )
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                pass
+
+        # 2. Streaming protection: menghitung chunk yang diterima secara streaming
+        bytes_received = 0
+
+        async def limited_receive() -> Any:
+            nonlocal bytes_received
+            message = await receive()
+            if message["type"] == "http.request":
+                body = message.get("body", b"")
+                bytes_received += len(body)
+                if bytes_received > limit:
+                    raise PayloadTooLargeError(limit)
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except PayloadTooLargeError as exc:
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
+            await response(scope, receive, send)
+
+
 app = FastAPI(title="Enerva AI", lifespan=lifespan)
+app.add_middleware(WebhookPayloadLimitMiddleware)
 
 
 
